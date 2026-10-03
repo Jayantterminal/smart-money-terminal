@@ -460,7 +460,7 @@ with tab2:
                                    "Accumulating: %{customdata[0]}%% of %{customdata[1]}<br>"
                                    "Fresh: %{customdata[2]}<br>"
                                    "Deliv qty 1M÷3M: %{customdata[3]:.2f}x<br>"
-                                   "Ret 1M: %{customdata[4]:+.1f}%<extra></extra>"))
+                                   "Ret 1M: %{customdata[4]:+.1f}%<extra></extra>")))
             fig.add_vline(x=0, line_color="#475569", line_width=1)
             fig.add_hline(y=0, line_color="#475569", line_width=1)
             fig.update_layout(
