@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from zoneinfo import ZoneInfo
 
@@ -43,6 +44,18 @@ WATCHLIST = {
     "Media": ["SUNTV", "PVRINOX", "ZEEL"],
 }
 SECTOR_OF = {s: sec for sec, lst in WATCHLIST.items() for s in lst}
+
+# ETFs / liquid & debt funds also trade in NSE "EQ" series - exclude them.
+# Add any leftover symbol here to hide it permanently.
+EXCLUDE = {"GOLDSHARE", "AXISGOLD", "SBIGOLD", "KOTAKGOLD", "TATAGOLD", "HDFCGOLD", "LICMFGOLD",
+           "SILVERIETF", "CPSEETF", "GOLD1", "GOLDCASE", "SILVER1"}
+_FUND_RE = re.compile(r"(BEES|ETF|LIQUID|GILT|NIFTY|SENSEX|NEXT50|MON100|MOM100|LOWVOL|QUAL30|"
+                      r"MOVALUE|MOSMALL|MAFANG|MOMENTUM|MID150|SMALL250|TOP100|OVERNIGHT)")
+
+
+def is_fund(sym: str) -> bool:
+    return sym in EXCLUDE or bool(_FUND_RE.search(sym))
+
 
 COLS = ["SYMBOL", "Date", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE",
         "TTL_TRD_QNTY", "TURNOVER_LACS", "DELIV_QTY", "DELIV_PER"]
@@ -153,7 +166,10 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
     watch = set(SECTOR_OF) | set(extra)
     rows = []
     for sym, g in hist.groupby("SYMBOL", sort=False):
-        if len(g) < 25:
+        if len(g) < 25 or is_fund(sym):
+            continue
+        # liquid/debt funds barely move (daily std < 0.4%) -> not stocks
+        if g.CLOSE_PRICE.pct_change().tail(60).std() * 100 < 0.4:
             continue
         t, base = g.iloc[-1], g.iloc[-21:-1]
         if pd.isna(t.DELIV_QTY) or pd.isna(t.DELIV_PER):
