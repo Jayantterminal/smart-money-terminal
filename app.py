@@ -1,359 +1,746 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+"""
+Institutional Smart Money Terminal  (v2)
+----------------------------------------
+Framework (3 pillars):
+  P1  Sector capital rotation  -> trade only sectors with institutional INFLOW
+  P2  Cash delivery spurt      -> delivery % >= 45  AND  spurt >= 2.0x
+  P3  Buy range + 15m CHoCH    -> entry only on a CLOSED 15m candle above the CHoCH trigger
+
+Run:      streamlit run app.py
+Needs:    streamlit>=1.40, pandas, numpy, yfinance, openpyxl, requests(optional)
+Password: set TERMINAL_PASSWORD in .streamlit/secrets.toml (or env var).
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hmac
 import io
-import datetime
-import os
 import json
-import requests
-import yfinance as yf
+import os
+import uuid
+
+import numpy as np
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from packaging.version import Version
 
-# Page Config
-st.set_page_config(
-    page_title="Institutional Smart Money Terminal",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Dark Terminal CSS
-st.markdown("""
-<style>
-    div[data-testid="stMetric"] {
-        background-color: #161B22;
-        border: 1px solid #30363D;
-        padding: 14px 18px;
-        border-radius: 6px;
-    }
-    div[data-testid="stMetricLabel"] {
-        color: #8B949E;
-        font-size: 13px;
-        font-weight: 600;
-        text-transform: uppercase;
-    }
-    div[data-testid="stMetricValue"] {
-        color: #F0F6FC;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 20px;
-        font-weight: 700;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #161B22;
-        border-radius: 4px;
-        color: #C9D1D9;
-        padding: 8px 16px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #21262D !important;
-        color: #58A6FF !important;
-        border-bottom: 2px solid #58A6FF !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ==========================================
-# 0. STRICT PASSWORD AUTHENTICATION LOCK
-# ==========================================
-MASTER_PASSWORD = "2000"
-
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-
-if not st.session_state["authenticated"]:
-    st.markdown("<h2 style='text-align: center; margin-top: 50px;'>🔒 Terminal Access Gate</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #8B949E;'>Enter terminal master security key to decrypt dashboard data.</p>", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 1.2, 1])
-    with col2:
-        with st.form("auth_form"):
-            pwd_input = st.text_input("Enter Password", type="password", placeholder="Enter key...")
-            submitted = st.form_submit_button("Unlock Terminal", use_container_width=True)
-            if submitted:
-                if pwd_input == MASTER_PASSWORD:
-                    st.session_state["authenticated"] = True
-                    st.success("Access Granted!")
-                    st.rerun()
-                else:
-                    st.error("Invalid Security Key. Access Denied.")
-    st.stop()
-
-# ==========================================
-# 1. LIVE TIME & REGIME CALCULATOR
-# ==========================================
-def get_current_ist_str():
-    ist_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
-    return ist_time.strftime("%d-%b-%Y | %I:%M:%S %p IST")
-
-if "last_refresh_dt" not in st.session_state:
-    st.session_state.last_refresh_dt = get_current_ist_str()
-
-@st.cache_data(ttl=600)
-def get_live_market_regime():
-    try:
-        nifty = yf.Ticker("^NSEI").history(period="3mo", interval="1d")
-        sensex = yf.Ticker("^BSESN").history(period="3mo", interval="1d")
-        
-        if not nifty.empty:
-            nifty_cmp = round(nifty['Close'].iloc[-1], 2)
-            nifty_prev = round(nifty['Close'].iloc[-2], 2)
-            nifty_chg = round(((nifty_cmp - nifty_prev) / nifty_prev) * 100, 2)
-            nifty_ema20 = nifty['Close'].ewm(span=20).mean().iloc[-1]
-            nifty_ema50 = nifty['Close'].ewm(span=50).mean().iloc[-1]
-
-            sensex_cmp = round(sensex['Close'].iloc[-1], 2) if not sensex.empty else 0.0
-            sensex_prev = round(sensex['Close'].iloc[-2], 2) if not sensex.empty else sensex_cmp
-            sensex_chg = round(((sensex_cmp - sensex_prev) / sensex_prev) * 100, 2) if sensex_prev > 0 else 0.0
-
-            if nifty_cmp >= nifty_ema20 and nifty_cmp >= nifty_ema50:
-                regime_status = "Bullish Markup"
-                regime_badge = f"↑ Nifty Uptrend ({'+' if nifty_chg >= 0 else ''}{nifty_chg}%) | Sensex ({'+' if sensex_chg >= 0 else ''}{sensex_chg}%)"
-            elif nifty_cmp < nifty_ema20 and nifty_cmp < nifty_ema50:
-                regime_status = "Bearish Markdown"
-                regime_badge = f"↓ Below 20 EMA ({nifty_chg}%) | Risk Off"
-            else:
-                regime_status = "Consolidation / Range"
-                regime_badge = f"↔ 20-50 EMA Compression ({nifty_chg}%)"
-
-            return regime_status, regime_badge, nifty_cmp, sensex_cmp
-    except Exception:
-        pass
-    return "Bullish Markup", "↑ Nifty 50 & Sensex Intact", 25800.0, 84200.0
-
-regime_title, regime_sub, n_live_val, s_live_val = get_live_market_regime()
-
-# Master Stock Directory
-@st.cache_data(ttl=86400)
-def load_full_nse_universe():
-    directory = {
-        "Ather Energy Ltd.": "ATHERENERG", "Bajaj Housing Finance Ltd.": "BAJAJHFL",
-        "Bajaj Auto Ltd.": "BAJAJ-AUTO", "Bajaj Finance Ltd.": "BAJFINANCE",
-        "Bajaj Finserv Ltd.": "BAJAJFINSV", "Star Health and Allied Insurance": "STARHEALTH",
-        "PNC Infratech Ltd.": "PNCINFRA", "Shree Cement Ltd.": "SHREECEM",
-        "Kajaria Ceramics Ltd.": "KAJARIACER", "Anuras Chemicals Ltd.": "ANURAS",
-        "Vesuvius India Ltd.": "VESUVIUS", "Indian Hotels Co Ltd.": "INDHOTEL",
-        "Electrosteel Castings Ltd.": "ELECTCAST", "IIFL Capital Services Ltd.": "IIFLCAPS",
-        "Emami Ltd.": "EMAMILTD", "Westlife Foodworld Ltd.": "WESTLIFE",
-        "Castrol India Ltd.": "CASTROLIND", "Entero Healthcare Solutions": "ENTERO",
-        "Sansera Engineering Ltd.": "SANSERA", "EIH Associated Hotels": "EIHOTEL",
-        "IKS Health": "IKS", "Shriram Pistons & Rings": "SHRIPISTON",
-        "JK Cement Ltd.": "JKCEMENT", "Kotak Mahindra Bank": "KOTAKBANK",
-        "AIA Engineering Ltd.": "AIAENG", "Polycab India Ltd.": "POLYCAB",
-        "Tube Investments of India": "TI", "Sona BLW Precision Forgings": "SONACOMS",
-        "Lenskart Solutions": "LENSKART", "Natco Pharma Ltd.": "NATCOPHARM",
-        "V-Guard Industries / VAML": "VAML", "PNB Housing Finance": "PNBHOUSING",
-        "Canara Bank": "CANBK", "Coforge Ltd.": "COFORGE",
-        "Bharat Electronics Ltd.": "BEL", "Tata Motors Ltd.": "TATAMOTORS",
-        "HDFC Bank Ltd.": "HDFCBANK", "ICICI Bank Ltd.": "ICICIBANK",
-        "Tata Consultancy Services": "TCS", "Cupid Ltd.": "CUPID",
-        "Reliance Industries Ltd.": "RELIANCE", "Tata Steel Ltd.": "TATASTEEL"
-    }
-    try:
-        u500 = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(u500, headers=headers, timeout=5)
-        if r.status_code == 200:
-            df = pd.read_csv(io.StringIO(r.text))
-            for _, row in df.iterrows():
-                c_name = str(row.get("Company Name", row.get("Symbol"))).strip()
-                s_code = str(row["Symbol"]).strip().upper()
-                directory[c_name] = s_code
-    except Exception:
-        pass
-    return directory
-
-NSE_DIRECTORY = load_full_nse_universe()
-
-# ==========================================
-# ACTIVE PORTFOLIO BOOK STORAGE
-# ==========================================
+# ==========================================================
+# CONSTANTS
+# ==========================================================
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30), name="IST")
+CANDLE_MIN = 15                 # CHoCH timeframe (minutes)
+MIN_DELIVERY_PCT = 45.0         # Pillar 2
+MIN_SPURT = 2.0                 # Pillar 2
+STALE_DEVIATION_PCT = 15.0      # live price vs radar snapshot -> levels considered stale
+MAX_LOGIN_ATTEMPTS = 5
+LEGACY_PASSWORD = "2000"        # fallback ONLY if no secret/env var is configured
 TRADE_BOOK_PATH = "data/active_trades.json"
-def load_trades():
-    if os.path.exists(TRADE_BOOK_PATH):
-        try:
-            with open(TRADE_BOOK_PATH, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
 
-def save_trades(trades):
-    os.makedirs(os.path.dirname(TRADE_BOOK_PATH), exist_ok=True)
-    with open(TRADE_BOOK_PATH, "w") as f:
-        json.dump(trades, f, indent=4)
+# Pillar 1 - single source of truth. True = institutional INFLOW, False = OUTFLOW.
+# Update this once per fortnight from your 6-fortnight rotation study.
+SECTOR_FLOW: dict[str, bool] = {
+    "Oil Gas & Consumable Fuels": True,
+    "Financial Services": True,
+    "Consumer Services": True,
+    "Construction Materials": True,
+    "Construction": True,
+    "Healthcare": True,
+    "Capital Goods": False,
+    "Chemicals": False,
+    "Automobile and Auto Components": False,
+    "Consumer Durables": False,
+    "Information Technology": False,
+    "Fast Moving Consumer Goods": False,
+}
 
-if "trades" not in st.session_state:
-    st.session_state.trades = load_trades()
-
-# ==========================================
-# 2. COMPLETE ACCUMULATION UNIVERSE BASE
-# ==========================================
-EXCEL_ACCUMULATION_RAW = [
-    {"Symbol": "CASTROLIND", "Company": "Castrol India Ltd.", "Sector": "Oil Gas & Consumable Fuels", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 199.04, "Buy Range Low": 196.00, "Buy Range High": 201.00, "CHoCH Trigger (Rs)": 204.50, "Support / TSL (Rs)": 191.00, "Target 1": 215.00, "Target 2": 226.00, "Target 3": 240.00, "Hinglish News & Catalyst Remark": "Strong cash delivery, deserve a spot on watchlist", "Volume Spurt": "2.12x", "Recent Deliv %": "57.4%", "Radar Age": "1 Day"},
-    {"Symbol": "AIAENG", "Company": "AIA Engineering Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 3824.40, "Buy Range Low": 3790.00, "Buy Range High": 3845.00, "CHoCH Trigger (Rs)": 3950.00, "Support / TSL (Rs)": 3710.00, "Target 1": 4180.00, "Target 2": 4350.00, "Target 3": 4580.00, "Hinglish News & Catalyst Remark": "Mining consumables order expansion, heavy block deals", "Volume Spurt": "2.25x", "Recent Deliv %": "52.4%", "Radar Age": "1 Day"},
-    {"Symbol": "ANURAS", "Company": "Anuras Chemicals Ltd.", "Sector": "Chemicals", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1163.70, "Buy Range Low": 1150.00, "Buy Range High": 1175.00, "CHoCH Trigger (Rs)": 1195.00, "Support / TSL (Rs)": 1135.00, "Target 1": 1280.00, "Target 2": 1340.00, "Target 3": 1410.00, "Hinglish News & Catalyst Remark": "Specialty chemical demand & base level institutional support", "Volume Spurt": "3.12x", "Recent Deliv %": "58.1%", "Radar Age": "1 Day"},
-    {"Symbol": "ATHERENERG", "Company": "Ather Energy Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1406.10, "Buy Range Low": 1385.00, "Buy Range High": 1420.00, "CHoCH Trigger (Rs)": 1455.00, "Support / TSL (Rs)": 1350.00, "Target 1": 1560.00, "Target 2": 1640.00, "Target 3": 1740.00, "Hinglish News & Catalyst Remark": "EV 2W delivery volume spike at baseline support", "Volume Spurt": "2.05x", "Recent Deliv %": "49.5%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJAJ-AUTO", "Company": "Bajaj Auto Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 10045.00, "Buy Range Low": 9950.00, "Buy Range High": 10120.00, "CHoCH Trigger (Rs)": 10350.00, "Support / TSL (Rs)": 9750.00, "Target 1": 11200.00, "Target 2": 11800.00, "Target 3": 12500.00, "Hinglish News & Catalyst Remark": "Premium 2W exports rise, institutional base building", "Volume Spurt": "2.25x", "Recent Deliv %": "53.0%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJAJFINSV", "Company": "Bajaj Finserv Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1732.60, "Buy Range Low": 1715.00, "Buy Range High": 1745.00, "CHoCH Trigger (Rs)": 1785.00, "Support / TSL (Rs)": 1680.00, "Target 1": 1920.00, "Target 2": 2040.00, "Target 3": 2180.00, "Hinglish News & Catalyst Remark": "Lending & insurance premium growth momentum", "Volume Spurt": "2.35x", "Recent Deliv %": "62.0%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJAJHFL", "Company": "Bajaj Housing Finance Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 82.91, "Buy Range Low": 81.80, "Buy Range High": 83.60, "CHoCH Trigger (Rs)": 86.40, "Support / TSL (Rs)": 79.50, "Target 1": 95.00, "Target 2": 102.00, "Target 3": 110.00, "Hinglish News & Catalyst Remark": "Institutional absorption post-listing consolidation", "Volume Spurt": "2.90x", "Recent Deliv %": "61.2%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJFINANCE", "Company": "Bajaj Finance Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 7250.00, "Buy Range Low": 7180.00, "Buy Range High": 7290.00, "CHoCH Trigger (Rs)": 7450.00, "Support / TSL (Rs)": 7020.00, "Target 1": 7900.00, "Target 2": 8250.00, "Target 3": 8650.00, "Hinglish News & Catalyst Remark": "AUM expansion & consumer finance delivery spurt", "Volume Spurt": "2.70x", "Recent Deliv %": "65.0%", "Radar Age": "1 Day"},
-    {"Symbol": "BEL", "Company": "Bharat Electronics Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 383.10, "Buy Range Low": 380.00, "Buy Range High": 386.00, "CHoCH Trigger (Rs)": 392.50, "Support / TSL (Rs)": 375.00, "Target 1": 416.00, "Target 2": 435.00, "Target 3": 465.00, "Hinglish News & Catalyst Remark": "Defence order book surge, awaiting 15m breakout above 392.5", "Volume Spurt": "2.80x", "Recent Deliv %": "55.4%", "Radar Age": "4 Days"},
-    {"Symbol": "CANBK", "Company": "Canara Bank", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 118.36, "Buy Range Low": 116.50, "Buy Range High": 119.50, "CHoCH Trigger (Rs)": 123.50, "Support / TSL (Rs)": 113.00, "Target 1": 132.00, "Target 2": 142.00, "Target 3": 154.00, "Hinglish News & Catalyst Remark": "PSU Bank credit expansion & low credit cost accumulation", "Volume Spurt": "2.45x", "Recent Deliv %": "57.0%", "Radar Age": "1 Day"},
-    {"Symbol": "COFORGE", "Company": "Coforge Ltd.", "Sector": "Information Technology", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 7850.00, "Buy Range Low": 7780.00, "Buy Range High": 7920.00, "CHoCH Trigger (Rs)": 8080.00, "Support / TSL (Rs)": 7580.00, "Target 1": 8500.00, "Target 2": 8900.00, "Target 3": 9300.00, "Hinglish News & Catalyst Remark": "Midcap IT client deal signing & delivery expansion", "Volume Spurt": "2.30x", "Recent Deliv %": "50.5%", "Radar Age": "1 Day"},
-    {"Symbol": "CUPID", "Company": "Cupid Ltd.", "Sector": "Consumer Durables", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 92.40, "Buy Range Low": 91.00, "Buy Range High": 93.50, "CHoCH Trigger (Rs)": 96.50, "Support / TSL (Rs)": 88.50, "Target 1": 105.00, "Target 2": 112.00, "Target 3": 120.00, "Hinglish News & Catalyst Remark": "Capacity expansion & retail distribution ramp-up", "Volume Spurt": "2.20x", "Recent Deliv %": "52.8%", "Radar Age": "1 Day"},
-    {"Symbol": "EIHOTEL", "Company": "EIH Associated Hotels", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 880.00, "Buy Range Low": 868.00, "Buy Range High": 890.00, "CHoCH Trigger (Rs)": 908.00, "Support / TSL (Rs)": 850.00, "Target 1": 965.00, "Target 2": 1020.00, "Target 3": 1090.00, "Hinglish News & Catalyst Remark": "Hospitality sector inflow shift, delivery build-up", "Volume Spurt": "2.35x", "Recent Deliv %": "55.0%", "Radar Age": "1 Day"},
-    {"Symbol": "ELECTCAST", "Company": "Electrosteel Castings Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 74.54, "Buy Range Low": 73.00, "Buy Range High": 75.50, "CHoCH Trigger (Rs)": 77.80, "Support / TSL (Rs)": 71.50, "Target 1": 84.00, "Target 2": 89.00, "Target 3": 96.00, "Hinglish News & Catalyst Remark": "Brokerage houses se target upgrade & buy call", "Volume Spurt": "2.46x", "Recent Deliv %": "47.4%", "Radar Age": "1 Day"},
-    {"Symbol": "EMAMILTD", "Company": "Emami Ltd.", "Sector": "Fast Moving Consumer Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 372.65, "Buy Range Low": 368.00, "Buy Range High": 375.00, "CHoCH Trigger (Rs)": 386.00, "Support / TSL (Rs)": 361.00, "Target 1": 425.00, "Target 2": 445.00, "Target 3": 470.00, "Hinglish News & Catalyst Remark": "Price rise, lower level valuation support", "Volume Spurt": "2.32x", "Recent Deliv %": "52.9%", "Radar Age": "1 Day"},
-    {"Symbol": "ENTERO", "Company": "Entero Healthcare Solutions", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1145.00, "Buy Range Low": 1130.00, "Buy Range High": 1155.00, "CHoCH Trigger (Rs)": 1175.00, "Support / TSL (Rs)": 1105.00, "Target 1": 1240.00, "Target 2": 1300.00, "Target 3": 1380.00, "Hinglish News & Catalyst Remark": "Healthcare logistics expansion & institutional absorption", "Volume Spurt": "2.65x", "Recent Deliv %": "58.2%", "Radar Age": "1 Day"},
-    {"Symbol": "HDFCBANK", "Company": "HDFC Bank Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1680.00, "Buy Range Low": 1665.00, "Buy Range High": 1692.00, "CHoCH Trigger (Rs)": 1718.00, "Support / TSL (Rs)": 1635.00, "Target 1": 1790.00, "Target 2": 1850.00, "Target 3": 1920.00, "Hinglish News & Catalyst Remark": "Deposit growth uptick, heavy FPI absorption", "Volume Spurt": "3.40x", "Recent Deliv %": "72.1%", "Radar Age": "1 Day"},
-    {"Symbol": "ICICIBANK", "Company": "ICICI Bank Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1285.00, "Buy Range Low": 1272.00, "Buy Range High": 1294.00, "CHoCH Trigger (Rs)": 1315.00, "Support / TSL (Rs)": 1250.00, "Target 1": 1380.00, "Target 2": 1430.00, "Target 3": 1490.00, "Hinglish News & Catalyst Remark": "Strong NIMs stability & sustained institutional delivery", "Volume Spurt": "2.95x", "Recent Deliv %": "69.0%", "Radar Age": "1 Day"},
-    {"Symbol": "IIFLCAPS", "Company": "IIFL Capital Services Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 345.60, "Buy Range Low": 340.00, "Buy Range High": 348.00, "CHoCH Trigger (Rs)": 354.00, "Support / TSL (Rs)": 332.00, "Target 1": 375.00, "Target 2": 395.00, "Target 3": 420.00, "Hinglish News & Catalyst Remark": "Institutional block deal / heavy stake accumulation", "Volume Spurt": "2.40x", "Recent Deliv %": "66.4%", "Radar Age": "1 Day"},
-    {"Symbol": "IKS", "Company": "IKS Health", "Sector": "Information Technology", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1420.00, "Buy Range Low": 1400.00, "Buy Range High": 1435.00, "CHoCH Trigger (Rs)": 1465.00, "Support / TSL (Rs)": 1370.00, "Target 1": 1560.00, "Target 2": 1640.00, "Target 3": 1720.00, "Hinglish News & Catalyst Remark": "IT healthcare services steady institutional base", "Volume Spurt": "2.20x", "Recent Deliv %": "48.1%", "Radar Age": "1 Day"},
-    {"Symbol": "INDHOTEL", "Company": "Indian Hotels Co Ltd.", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 718.00, "Buy Range Low": 710.00, "Buy Range High": 724.00, "CHoCH Trigger (Rs)": 738.00, "Support / TSL (Rs)": 698.00, "Target 1": 785.00, "Target 2": 820.00, "Target 3": 855.00, "Hinglish News & Catalyst Remark": "Share price rise 2.2%: valuation and sector rotation positive", "Volume Spurt": "2.40x", "Recent Deliv %": "61.3%", "Radar Age": "1 Day"},
-    {"Symbol": "JKCEMENT", "Company": "JK Cement Ltd.", "Sector": "Construction Materials", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 4350.00, "Buy Range Low": 4310.00, "Buy Range High": 4390.00, "CHoCH Trigger (Rs)": 4465.00, "Support / TSL (Rs)": 4220.00, "Target 1": 4700.00, "Target 2": 4900.00, "Target 3": 5150.00, "Hinglish News & Catalyst Remark": "Capacity commissioning and strong regional pricing", "Volume Spurt": "2.40x", "Recent Deliv %": "63.5%", "Radar Age": "1 Day"},
-    {"Symbol": "KAJARIACER", "Company": "Kajaria Ceramics Ltd.", "Sector": "Consumer Durables", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1225.10, "Buy Range Low": 1210.00, "Buy Range High": 1235.00, "CHoCH Trigger (Rs)": 1255.00, "Support / TSL (Rs)": 1180.00, "Target 1": 1315.00, "Target 2": 1380.00, "Target 3": 1450.00, "Hinglish News & Catalyst Remark": "Fundamentals & sector valuation expansion", "Volume Spurt": "3.10x", "Recent Deliv %": "68.5%", "Radar Age": "1 Day"},
-    {"Symbol": "KOTAKBANK", "Company": "Kotak Mahindra Bank", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1820.00, "Buy Range Low": 1805.00, "Buy Range High": 1835.00, "CHoCH Trigger (Rs)": 1858.00, "Support / TSL (Rs)": 1775.00, "Target 1": 1940.00, "Target 2": 2010.00, "Target 3": 2100.00, "Hinglish News & Catalyst Remark": "Tech embargo resolution benefits & loan growth pickup", "Volume Spurt": "2.75x", "Recent Deliv %": "62.1%", "Radar Age": "1 Day"},
-    {"Symbol": "LENSKART", "Company": "Lenskart Solutions", "Sector": "Consumer Durables", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 385.00, "Buy Range Low": 380.00, "Buy Range High": 389.00, "CHoCH Trigger (Rs)": 398.00, "Support / TSL (Rs)": 368.00, "Target 1": 430.00, "Target 2": 455.00, "Target 3": 485.00, "Hinglish News & Catalyst Remark": "Retail expansion footprint & strong offline same-store sales", "Volume Spurt": "2.85x", "Recent Deliv %": "64.0%", "Radar Age": "1 Day"},
-    {"Symbol": "NATCOPHARM", "Company": "Natco Pharma Ltd.", "Sector": "Healthcare", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1410.00, "Buy Range Low": 1395.00, "Buy Range High": 1425.00, "CHoCH Trigger (Rs)": 1450.00, "Support / TSL (Rs)": 1365.00, "Target 1": 1540.00, "Target 2": 1620.00, "Target 3": 1700.00, "Hinglish News & Catalyst Remark": "US generic approvals and steady formulation cash flows", "Volume Spurt": "2.85x", "Recent Deliv %": "61.0%", "Radar Age": "1 Day"},
-    {"Symbol": "PNCINFRA", "Company": "PNC Infratech Ltd.", "Sector": "Construction", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 138.16, "Buy Range Low": 136.00, "Buy Range High": 139.50, "CHoCH Trigger (Rs)": 143.90, "Support / TSL (Rs)": 128.40, "Target 1": 152.00, "Target 2": 162.00, "Target 3": 175.00, "Hinglish News & Catalyst Remark": "Brokerage houses se target upgrade & heavy buying pressure", "Volume Spurt": "3.77x", "Recent Deliv %": "45.4%", "Radar Age": "1 Day"},
-    {"Symbol": "SANSERA", "Company": "Sansera Engineering Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1320.00, "Buy Range Low": 1305.00, "Buy Range High": 1335.00, "CHoCH Trigger (Rs)": 1358.00, "Support / TSL (Rs)": 1275.00, "Target 1": 1430.00, "Target 2": 1500.00, "Target 3": 1580.00, "Hinglish News & Catalyst Remark": "EV aerospace components order book expansion", "Volume Spurt": "2.45x", "Recent Deliv %": "46.7%", "Radar Age": "1 Day"},
-    {"Symbol": "SHREECEM", "Company": "Shree Cement Ltd.", "Sector": "Construction Materials", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 21900.00, "Buy Range Low": 21700.00, "Buy Range High": 22100.00, "CHoCH Trigger (Rs)": 22650.00, "Support / TSL (Rs)": 21350.00, "Target 1": 23800.00, "Target 2": 24900.00, "Target 3": 26200.00, "Hinglish News & Catalyst Remark": "Share Price Near Low With Mixed Valuation, institutional accumulation", "Volume Spurt": "3.47x", "Recent Deliv %": "51.9%", "Radar Age": "1 Day"},
-    {"Symbol": "SHRIPISTON", "Company": "Shriram Pistons & Rings", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 2040.00, "Buy Range Low": 2015.00, "Buy Range High": 2060.00, "CHoCH Trigger (Rs)": 2110.00, "Support / TSL (Rs)": 1965.00, "Target 1": 2240.00, "Target 2": 2350.00, "Target 3": 2480.00, "Hinglish News & Catalyst Remark": "Strong cash delivery absorption at support band", "Volume Spurt": "2.15x", "Recent Deliv %": "54.2%", "Radar Age": "1 Day"},
-    {"Symbol": "STARHEALTH", "Company": "Star Health and Allied Insurance", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 537.70, "Buy Range Low": 530.00, "Buy Range High": 542.00, "CHoCH Trigger (Rs)": 558.00, "Support / TSL (Rs)": 513.00, "Target 1": 595.00, "Target 2": 625.00, "Target 3": 660.00, "Hinglish News & Catalyst Remark": "Pullback support level hold kar raha hai, delivery 59.6%", "Volume Spurt": "4.77x", "Recent Deliv %": "59.6%", "Radar Age": "1 Day"},
-    {"Symbol": "VESUVIUS", "Company": "Vesuvius India Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 404.10, "Buy Range Low": 398.00, "Buy Range High": 408.00, "CHoCH Trigger (Rs)": 422.00, "Support / TSL (Rs)": 388.00, "Target 1": 465.00, "Target 2": 495.00, "Target 3": 530.00, "Hinglish News & Catalyst Remark": "REG - American Century Inv Vesuvius plc Form 8.3 heavy stake filing", "Volume Spurt": "2.55x", "Recent Deliv %": "48.9%", "Radar Age": "1 Day"},
-    {"Symbol": "WESTLIFE", "Company": "Westlife Foodworld Ltd.", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 588.05, "Buy Range Low": 580.00, "Buy Range High": 594.00, "CHoCH Trigger (Rs)": 605.00, "Support / TSL (Rs)": 568.00, "Target 1": 645.00, "Target 2": 680.00, "Target 3": 720.00, "Hinglish News & Catalyst Remark": "Institutional block deal / heavy stake accumulation", "Volume Spurt": "2.18x", "Recent Deliv %": "49.9%", "Radar Age": "1 Day"}
+# Accumulation universe (snapshot from Bhavcopy study).
+RADAR_COLUMNS = [
+    "symbol", "company", "sector", "snap_cmp", "buy_low", "buy_high", "choch", "support",
+    "t1", "t2", "t3", "remark", "spurt", "deliv", "age_days",
+]
+RADAR_ROWS = [
+    ("CASTROLIND", "Castrol India Ltd.", "Oil Gas & Consumable Fuels", 199.04, 196.00, 201.00, 204.50, 191.00, 215.00, 226.00, 240.00, "Strong cash delivery, deserve a spot on watchlist", 2.12, 57.4, 1),
+    ("AIAENG", "AIA Engineering Ltd.", "Capital Goods", 3824.40, 3790.00, 3845.00, 3950.00, 3710.00, 4180.00, 4350.00, 4580.00, "Mining consumables order expansion, heavy block deals", 2.25, 52.4, 1),
+    ("ANURAS", "Anuras Chemicals Ltd.", "Chemicals", 1163.70, 1150.00, 1175.00, 1195.00, 1135.00, 1280.00, 1340.00, 1410.00, "Specialty chemical demand & base level institutional support", 3.12, 58.1, 1),
+    ("ATHERENERG", "Ather Energy Ltd.", "Automobile and Auto Components", 1406.10, 1385.00, 1420.00, 1455.00, 1350.00, 1560.00, 1640.00, 1740.00, "EV 2W delivery volume spike at baseline support", 2.05, 49.5, 1),
+    ("BAJAJ-AUTO", "Bajaj Auto Ltd.", "Automobile and Auto Components", 10045.00, 9950.00, 10120.00, 10350.00, 9750.00, 11200.00, 11800.00, 12500.00, "Premium 2W exports rise, institutional base building", 2.25, 53.0, 1),
+    ("BAJAJFINSV", "Bajaj Finserv Ltd.", "Financial Services", 1732.60, 1715.00, 1745.00, 1785.00, 1680.00, 1920.00, 2040.00, 2180.00, "Lending & insurance premium growth momentum", 2.35, 62.0, 1),
+    ("BAJAJHFL", "Bajaj Housing Finance Ltd.", "Financial Services", 82.91, 81.80, 83.60, 86.40, 79.50, 95.00, 102.00, 110.00, "Institutional absorption post-listing consolidation", 2.90, 61.2, 1),
+    ("BAJFINANCE", "Bajaj Finance Ltd.", "Financial Services", 7250.00, 7180.00, 7290.00, 7450.00, 7020.00, 7900.00, 8250.00, 8650.00, "AUM expansion & consumer finance delivery spurt", 2.70, 65.0, 1),
+    ("BEL", "Bharat Electronics Ltd.", "Capital Goods", 383.10, 380.00, 386.00, 392.50, 375.00, 416.00, 435.00, 465.00, "Defence order book surge, awaiting 15m breakout above 392.5", 2.80, 55.4, 4),
+    ("CANBK", "Canara Bank", "Financial Services", 118.36, 116.50, 119.50, 123.50, 113.00, 132.00, 142.00, 154.00, "PSU Bank credit expansion & low credit cost accumulation", 2.45, 57.0, 1),
+    ("COFORGE", "Coforge Ltd.", "Information Technology", 7850.00, 7780.00, 7920.00, 8080.00, 7580.00, 8500.00, 8900.00, 9300.00, "Midcap IT client deal signing & delivery expansion", 2.30, 50.5, 1),
+    ("CUPID", "Cupid Ltd.", "Consumer Durables", 92.40, 91.00, 93.50, 96.50, 88.50, 105.00, 112.00, 120.00, "Capacity expansion & retail distribution ramp-up", 2.20, 52.8, 1),
+    ("EIHOTEL", "EIH Associated Hotels", "Consumer Services", 880.00, 868.00, 890.00, 908.00, 850.00, 965.00, 1020.00, 1090.00, "Hospitality sector inflow shift, delivery build-up", 2.35, 55.0, 1),
+    ("ELECTCAST", "Electrosteel Castings Ltd.", "Capital Goods", 74.54, 73.00, 75.50, 77.80, 71.50, 84.00, 89.00, 96.00, "Brokerage houses se target upgrade & buy call", 2.46, 47.4, 1),
+    ("EMAMILTD", "Emami Ltd.", "Fast Moving Consumer Goods", 372.65, 368.00, 375.00, 386.00, 361.00, 425.00, 445.00, 470.00, "Price rise, lower level valuation support", 2.32, 52.9, 1),
+    ("ENTERO", "Entero Healthcare Solutions", "Consumer Services", 1145.00, 1130.00, 1155.00, 1175.00, 1105.00, 1240.00, 1300.00, 1380.00, "Healthcare logistics expansion & institutional absorption", 2.65, 58.2, 1),
+    ("HDFCBANK", "HDFC Bank Ltd.", "Financial Services", 1680.00, 1665.00, 1692.00, 1718.00, 1635.00, 1790.00, 1850.00, 1920.00, "Deposit growth uptick, heavy FPI absorption", 3.40, 72.1, 1),
+    ("ICICIBANK", "ICICI Bank Ltd.", "Financial Services", 1285.00, 1272.00, 1294.00, 1315.00, 1250.00, 1380.00, 1430.00, 1490.00, "Strong NIMs stability & sustained institutional delivery", 2.95, 69.0, 1),
+    ("IIFLCAPS", "IIFL Capital Services Ltd.", "Financial Services", 345.60, 340.00, 348.00, 354.00, 332.00, 375.00, 395.00, 420.00, "Institutional block deal / heavy stake accumulation", 2.40, 66.4, 1),
+    ("IKS", "IKS Health", "Information Technology", 1420.00, 1400.00, 1435.00, 1465.00, 1370.00, 1560.00, 1640.00, 1720.00, "IT healthcare services steady institutional base", 2.20, 48.1, 1),
+    ("INDHOTEL", "Indian Hotels Co Ltd.", "Consumer Services", 718.00, 710.00, 724.00, 738.00, 698.00, 785.00, 820.00, 855.00, "Share price rise 2.2%: valuation and sector rotation positive", 2.40, 61.3, 1),
+    ("JKCEMENT", "JK Cement Ltd.", "Construction Materials", 4350.00, 4310.00, 4390.00, 4465.00, 4220.00, 4700.00, 4900.00, 5150.00, "Capacity commissioning and strong regional pricing", 2.40, 63.5, 1),
+    ("KAJARIACER", "Kajaria Ceramics Ltd.", "Consumer Durables", 1225.10, 1210.00, 1235.00, 1255.00, 1180.00, 1315.00, 1380.00, 1450.00, "Fundamentals & sector valuation expansion", 3.10, 68.5, 1),
+    ("KOTAKBANK", "Kotak Mahindra Bank", "Financial Services", 1820.00, 1805.00, 1835.00, 1858.00, 1775.00, 1940.00, 2010.00, 2100.00, "Tech embargo resolution benefits & loan growth pickup", 2.75, 62.1, 1),
+    ("LENSKART", "Lenskart Solutions", "Consumer Durables", 385.00, 380.00, 389.00, 398.00, 368.00, 430.00, 455.00, 485.00, "Retail expansion footprint & strong offline same-store sales", 2.85, 64.0, 1),
+    ("NATCOPHARM", "Natco Pharma Ltd.", "Healthcare", 1410.00, 1395.00, 1425.00, 1450.00, 1365.00, 1540.00, 1620.00, 1700.00, "US generic approvals and steady formulation cash flows", 2.85, 61.0, 1),
+    ("PNCINFRA", "PNC Infratech Ltd.", "Construction", 138.16, 136.00, 139.50, 143.90, 128.40, 152.00, 162.00, 175.00, "Brokerage houses se target upgrade & heavy buying pressure", 3.77, 45.4, 1),
+    ("SANSERA", "Sansera Engineering Ltd.", "Automobile and Auto Components", 1320.00, 1305.00, 1335.00, 1358.00, 1275.00, 1430.00, 1500.00, 1580.00, "EV aerospace components order book expansion", 2.45, 46.7, 1),
+    ("SHREECEM", "Shree Cement Ltd.", "Construction Materials", 21900.00, 21700.00, 22100.00, 22650.00, 21350.00, 23800.00, 24900.00, 26200.00, "Share Price Near Low With Mixed Valuation, institutional accumulation", 3.47, 51.9, 1),
+    ("SHRIPISTON", "Shriram Pistons & Rings", "Automobile and Auto Components", 2040.00, 2015.00, 2060.00, 2110.00, 1965.00, 2240.00, 2350.00, 2480.00, "Strong cash delivery absorption at support band", 2.15, 54.2, 1),
+    ("STARHEALTH", "Star Health and Allied Insurance", "Financial Services", 537.70, 530.00, 542.00, 558.00, 513.00, 595.00, 625.00, 660.00, "Pullback support level hold kar raha hai, delivery 59.6%", 4.77, 59.6, 1),
+    ("VESUVIUS", "Vesuvius India Ltd.", "Capital Goods", 404.10, 398.00, 408.00, 422.00, 388.00, 465.00, 495.00, 530.00, "REG - American Century Inv Vesuvius plc Form 8.3 heavy stake filing", 2.55, 48.9, 1),
+    ("WESTLIFE", "Westlife Foodworld Ltd.", "Consumer Services", 588.05, 580.00, 594.00, 605.00, 568.00, 645.00, 680.00, 720.00, "Institutional block deal / heavy stake accumulation", 2.18, 49.9, 1),
 ]
 
-# ==========================================
-# 3. DYNAMIC STATUS & TRIGGER CALCULATOR
-# ==========================================
-processed_stocks = []
-for item in EXCEL_ACCUMULATION_RAW:
-    row = item.copy()
-    cmp = row["CMP (Rs)"]
-    choch = row["CHoCH Trigger (Rs)"]
-    b_low = row["Buy Range Low"]
-    b_high = row["Buy Range High"]
-    
-    # Range String Format for Display
-    row["Smart Money Buy Range (Rs)"] = f"₹{b_low:.2f} – ₹{b_high:.2f}"
-    
-    # STRICT INSTITUTIONAL EXECUTION RULE:
-    # Entry sirf tabhi valid hoti hai jab CMP >= CHoCH Trigger ho
-    if cmp >= choch:
-        row["Live Status"] = "⚡ ACTIVE"
-        row["Trade Action"] = "ACT: ENTERED"
-        row["SMC Structure"] = "CONFIRMED CHoCH (BUY)"
-        row["Trade Signal"] = "BUY TRIGGER CONFIRMED"
-    elif b_low <= cmp <= b_high:
-        row["Live Status"] = "🟢 IN ACCUMULATION"
-        row["Trade Action"] = "NEW WATCHLIST"
-        row["SMC Structure"] = "⌛ ABSORPTION (WAIT)"
-        row["Trade Signal"] = "WAIT FOR CHoCH TRIGGER"
+# status -> sort rank (lower = more actionable)
+RANK = {
+    "ACTIVE": 0, "EXTENDED": 1, "ZONE": 2, "PRE": 3, "BELOW": 4,
+    "NODATA": 5, "STALE": 6, "INVALID": 7, "BLOCKED": 8,
+}
+
+# ==========================================================
+# SMALL HELPERS
+# ==========================================================
+def _stretch_kwargs() -> dict:
+    """Streamlit >=1.50 prefers width='stretch'; older versions need use_container_width."""
+    try:
+        if Version(st.__version__) >= Version("1.50.0"):
+            return {"width": "stretch"}
+    except Exception:
+        pass
+    return {"use_container_width": True}
+
+
+STRETCH = _stretch_kwargs()
+
+
+def now_ist() -> dt.datetime:
+    return dt.datetime.now(IST)
+
+
+def market_state(now: dt.datetime) -> str:
+    """Weekday + 09:15-15:30 IST check. NSE holiday calendar is NOT checked."""
+    if now.weekday() >= 5:
+        return "CLOSED (weekend)"
+    if dt.time(9, 15) <= now.time() <= dt.time(15, 30):
+        return "OPEN"
+    return "CLOSED"
+
+
+def fmt_pct(x: float | None) -> str:
+    return "n/a" if x is None or pd.isna(x) else f"{x:+.2f}%"
+
+
+# ==========================================================
+# AUTH
+# ==========================================================
+def _master_password() -> tuple[str, bool]:
+    """Returns (password, is_default). Secret > env var > legacy fallback."""
+    pwd = None
+    try:
+        pwd = st.secrets.get("TERMINAL_PASSWORD")
+    except Exception:  # no secrets.toml present
+        pwd = None
+    pwd = pwd or os.environ.get("TERMINAL_PASSWORD")
+    if pwd:
+        return str(pwd), False
+    return LEGACY_PASSWORD, True
+
+
+def auth_gate() -> bool:
+    st.session_state.setdefault("authenticated", False)
+    st.session_state.setdefault("failed_attempts", 0)
+    if st.session_state["authenticated"]:
+        return True
+
+    st.markdown("<h2 style='text-align:center;margin-top:50px;'>🔒 Terminal Access Gate</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#8B949E;'>Enter terminal master security key.</p>", unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        with st.form("auth_form"):
+            pwd_in = st.text_input("Password", type="password", placeholder="Enter key...")
+            submitted = st.form_submit_button("Unlock Terminal", **STRETCH)
+        if submitted:
+            master, _ = _master_password()
+            if st.session_state["failed_attempts"] >= MAX_LOGIN_ATTEMPTS:
+                st.error("Too many failed attempts in this session. Reload the page to retry.")
+            elif hmac.compare_digest(pwd_in.encode("utf-8"), master.encode("utf-8")):
+                st.session_state["authenticated"] = True
+                st.session_state["failed_attempts"] = 0
+                st.rerun()
+            else:
+                st.session_state["failed_attempts"] += 1
+                left = MAX_LOGIN_ATTEMPTS - st.session_state["failed_attempts"]
+                st.error(f"Invalid security key. Attempts left: {max(left, 0)}")
+    return False
+
+
+# ==========================================================
+# LIVE DATA
+# ==========================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def get_market_regime() -> dict:
+    """Nifty vs 20/50 EMA (daily). Never fabricates data: returns ok=False on failure."""
+    try:
+        nifty = yf.Ticker("^NSEI").history(period="6mo", interval="1d")["Close"].dropna()
+        sensex = yf.Ticker("^BSESN").history(period="6mo", interval="1d")["Close"].dropna()
+    except Exception:
+        return {"ok": False}
+    if len(nifty) < 50 or len(sensex) < 2:
+        return {"ok": False}
+
+    n_cmp, n_prev = float(nifty.iloc[-1]), float(nifty.iloc[-2])
+    s_cmp, s_prev = float(sensex.iloc[-1]), float(sensex.iloc[-2])
+    ema20 = float(nifty.ewm(span=20, adjust=False).mean().iloc[-1])
+    ema50 = float(nifty.ewm(span=50, adjust=False).mean().iloc[-1])
+
+    if n_cmp >= ema20 and n_cmp >= ema50:
+        regime = "Bullish Markup"
+    elif n_cmp < ema20 and n_cmp < ema50:
+        regime = "Bearish Markdown"
     else:
-        row["Live Status"] = "⚪ TRACKING"
-        row["Trade Action"] = "NEW WATCHLIST"
-        row["SMC Structure"] = "⌛ ABSORPTION (WAIT)"
-        row["Trade Signal"] = "WAIT FOR CHoCH TRIGGER"
-        
-    processed_stocks.append(row)
+        regime = "Consolidation / Range"
+    return {
+        "ok": True, "regime": regime,
+        "nifty": n_cmp, "nifty_chg": (n_cmp / n_prev - 1) * 100,
+        "sensex": s_cmp, "sensex_chg": (s_cmp / s_prev - 1) * 100,
+        "ema20": ema20, "ema50": ema50,
+    }
 
-df_terminal = pd.DataFrame(processed_stocks)
 
-# ==========================================
-# 4. EXCEL EXPORT BUILDER (EXACT STYLING)
-# ==========================================
-def generate_excel_export(df):
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
+    """
+    One batched 15m download for the whole universe.
+      cmp         -> latest traded price (may belong to a still-forming candle)
+      last_close  -> close of the LAST COMPLETED 15m candle  (used for CHoCH confirmation)
+    A candle stamped T covers [T, T+15m); it is 'closed' only when T+15m <= now.
+    """
+    fetched_at = now_ist()
+    empty = {"quotes": {}, "fetched_at": fetched_at}
+    if not symbols:
+        return empty
+    tickers = [f"{s}.NS" for s in symbols]
+    try:
+        raw = yf.download(
+            tickers, period="5d", interval=f"{CANDLE_MIN}m", group_by="ticker",
+            auto_adjust=False, progress=False, threads=True,
+        )
+    except Exception:
+        return empty
+    if raw is None or raw.empty:
+        return empty
+
+    multi = isinstance(raw.columns, pd.MultiIndex)
+    if not multi and len(symbols) > 1:  # ambiguous shape -> refuse rather than mis-assign prices
+        return empty
+
+    now_ts = pd.Timestamp(fetched_at)
+    quotes: dict = {}
+    for sym, tkr in zip(symbols, tickers):
+        try:
+            frame = raw[tkr] if multi else raw
+            close = frame["Close"].dropna()
+            if close.empty:
+                continue
+            idx = close.index
+            idx = idx.tz_localize(IST) if idx.tz is None else idx.tz_convert(IST)
+            close = pd.Series(close.to_numpy(dtype=float), index=idx)
+
+            if now_ts - close.index[-1] > pd.Timedelta(days=5):
+                continue  # dead / stale feed
+
+            closed = close[(close.index + pd.Timedelta(minutes=CANDLE_MIN)) <= now_ts]
+            last_date = close.index[-1].date()
+            prev_mask = np.array([d < last_date for d in close.index.date], dtype=bool)
+            prev = close[prev_mask]
+
+            quotes[sym] = {
+                "cmp": float(close.iloc[-1]),
+                "last_close": float(closed.iloc[-1]) if not closed.empty else None,
+                "candle_time": closed.index[-1] if not closed.empty else None,
+                "data_time": close.index[-1],
+                "prev_close": float(prev.iloc[-1]) if not prev.empty else None,
+            }
+        except Exception:
+            continue
+    return {"quotes": quotes, "fetched_at": fetched_at}
+
+
+# ==========================================================
+# RADAR LOGIC
+# ==========================================================
+def build_radar() -> pd.DataFrame:
+    return pd.DataFrame(RADAR_ROWS, columns=RADAR_COLUMNS)
+
+
+def validate_radar(df: pd.DataFrame) -> list[str]:
+    issues: list[str] = []
+    dups = df.loc[df["symbol"].duplicated(), "symbol"].tolist()
+    if dups:
+        issues.append(f"Duplicate symbols: {', '.join(dups)}")
+    for r in df.to_dict("records"):
+        s = r["symbol"]
+        if not (0 < r["support"] < r["buy_low"] <= r["buy_high"] < r["choch"]):
+            issues.append(f"{s}: levels must satisfy Support < Buy Low <= Buy High < CHoCH")
+        if not (r["choch"] < r["t1"] < r["t2"] < r["t3"]):
+            issues.append(f"{s}: targets must satisfy CHoCH < T1 < T2 < T3")
+        if r["sector"] not in SECTOR_FLOW:
+            issues.append(f"{s}: sector '{r['sector']}' missing in SECTOR_FLOW (treated as NOT tradable)")
+    return issues
+
+
+def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> pd.DataFrame:
+    out = []
+    for r in radar.to_dict("records"):
+        sym = r["symbol"]
+        q = quotes.get(sym)
+        cmp_ = q["cmp"] if q else None
+        last_close = q["last_close"] if q else None
+
+        flow = SECTOR_FLOW.get(r["sector"])
+        flow_label = "☑️ Inflow" if flow is True else ("⚠️ Outflow" if flow is False else "❓ Unmapped")
+        p2_pass = r["deliv"] >= MIN_DELIVERY_PCT and r["spurt"] >= MIN_SPURT
+        tradable = (flow is True) and p2_pass
+
+        entry_ref = r["choch"]
+        risk = entry_ref - r["support"]
+        t1_pct = (r["t1"] / entry_ref - 1) * 100
+        t2_pct = (r["t2"] / entry_ref - 1) * 100
+        t3_pct = (r["t3"] / entry_ref - 1) * 100
+        rr_t1 = (r["t1"] - entry_ref) / risk if risk > 0 else np.nan
+
+        day_pct = None
+        if q and q.get("prev_close"):
+            day_pct = (cmp_ / q["prev_close"] - 1) * 100
+
+        # ---- status ladder (order matters) ----
+        if flow is not True:
+            key, status, action = "BLOCKED", "⛔ BLOCKED – Sector Outflow" if flow is False else "⛔ BLOCKED – Unmapped Sector", "NO TRADE (Pillar 1)"
+        elif not p2_pass:
+            key, status, action = "BLOCKED", "⛔ BLOCKED – Delivery/Spurt", "NO TRADE (Pillar 2)"
+        elif cmp_ is None or last_close is None:
+            key, status, action = "NODATA", "📴 NO LIVE DATA", "WAIT – FEED UNAVAILABLE"
+        elif abs(cmp_ / r["snap_cmp"] - 1) * 100 > STALE_DEVIATION_PCT:
+            key, status, action = "STALE", "⚠️ LEVELS STALE", "REFRESH RADAR LEVELS / CHECK TICKER"
+        elif last_close < r["support"]:
+            key, status, action = "INVALID", "❌ INVALIDATED", "AVOID – STRUCTURE BROKEN"
+        elif last_close >= r["choch"]:
+            ext = (last_close / r["choch"] - 1) * 100
+            if ext > max_chase_pct:
+                key, status, action = "EXTENDED", "🟠 EXTENDED – NO CHASE", f"WAIT PULLBACK ({ext:.1f}% above trigger)"
+            else:
+                key, status, action = "ACTIVE", "⚡ ACTIVE – BUY TRIGGER", "ENTER (15m CHoCH CONFIRMED)"
+        elif r["buy_low"] <= cmp_ <= r["buy_high"]:
+            key, status, action = "ZONE", "🟢 IN BUY ZONE", "WATCH – WAIT 15m CLOSE > CHoCH"
+        elif cmp_ > r["buy_high"]:
+            key, status = "PRE", "🟡 PRE-TRIGGER"
+            action = "CHoCH TOUCHED – WAIT 15m CLOSE" if cmp_ >= r["choch"] else "WATCH – NEAR TRIGGER"
+        else:
+            key, status, action = "BELOW", "⚪ BELOW BUY ZONE", "TRACKING"
+
+        if last_close is None:
+            choch_state = "—"
+        else:
+            choch_state = "✅ Confirmed" if last_close >= r["choch"] else "⏳ Pending"
+
+        out.append({
+            "Symbol": sym, "Company": r["company"], "Sector": r["sector"],
+            "Sector Flow": flow_label, "Tradable (3-Pillar)": "✅" if tradable else "—",
+            "Status": status, "Action": action,
+            "CMP (Rs)": cmp_, "Day %": day_pct,
+            "Smart Money Buy Range (Rs)": f"₹{r['buy_low']:.2f} – ₹{r['buy_high']:.2f}",
+            "CHoCH Trigger (Rs)": r["choch"], "Last 15m Close (Rs)": last_close, "15m CHoCH": choch_state,
+            "Support / TSL (Rs)": r["support"],
+            "Target 1": r["t1"], "Target 2": r["t2"], "Target 3": r["t3"],
+            "T1 %": t1_pct, "T2 %": t2_pct, "T3 %": t3_pct, "R:R (T1)": rr_t1,
+            "Volume Spurt (x)": r["spurt"], "Delivery %": r["deliv"], "Radar Age (Days)": r["age_days"],
+            "Catalyst Remark": r["remark"],
+            "_key": key, "_rank": RANK[key], "_tradable": tradable,
+        })
+    df = pd.DataFrame(out)
+    return df.sort_values(["_rank", "Volume Spurt (x)"], ascending=[True, False]).reset_index(drop=True)
+
+
+# ==========================================================
+# EXCEL EXPORT
+# ==========================================================
+EXPORT_COLUMNS = [
+    "Symbol", "Company", "Sector", "Sector Flow", "Tradable (3-Pillar)", "Status", "Action",
+    "CMP (Rs)", "Day %", "Smart Money Buy Range (Rs)", "CHoCH Trigger (Rs)", "Last 15m Close (Rs)",
+    "15m CHoCH", "Support / TSL (Rs)", "Target 1", "Target 2", "Target 3",
+    "T1 %", "T2 %", "T3 %", "R:R (T1)", "Volume Spurt (x)", "Delivery %", "Radar Age (Days)", "Catalyst Remark",
+]
+_PRICE_COLS = {"CMP (Rs)", "CHoCH Trigger (Rs)", "Last 15m Close (Rs)", "Support / TSL (Rs)", "Target 1", "Target 2", "Target 3"}
+_NUM2_COLS = {"Day %", "T1 %", "T2 %", "T3 %", "R:R (T1)", "Volume Spurt (x)"}
+_ROW_FILL = {
+    "ACTIVE": "C6EFCE", "EXTENDED": "FCE4D6", "ZONE": "E2EFDA",
+    "INVALID": "F8CBAD", "BLOCKED": "EDEDED", "STALE": "FFF2CC",
+}
+
+
+def generate_excel_export(df: pd.DataFrame, meta: dict) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "SMC_Accumulation_Radar"
-    
-    export_cols = [
-        "Symbol", "Company", "Sector", "CMP (Rs)", "Smart Money Buy Range (Rs)",
-        "CHoCH Trigger (Rs)", "Support / TSL (Rs)", "Target 1", "Target 2", "Target 3",
-        "Volume Spurt", "Recent Deliv %", "Radar Age", "Live Status", "Trade Action", "SMC Structure"
-    ]
-    
-    ws.append(export_cols)
-    
-    header_fill = PatternFill(start_color="161B22", end_color="161B22", fill_type="solid")
-    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    
-    for col_num, col_name in enumerate(export_cols, 1):
-        cell = ws.cell(row=1, column=col_num)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        
-    for r_idx, row_data in df.iterrows():
-        row_vals = [row_data[c] for c in export_cols]
-        ws.append(row_vals)
-        current_row = r_idx + 2
-        
-        # Color coding rows based on active trigger
-        is_entered = row_data["Trade Action"] == "ACT: ENTERED"
-        row_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") if is_entered else None
-        
-        for col_num in range(1, len(export_cols) + 1):
-            cell = ws.cell(row=current_row, column=col_num)
-            if row_fill:
-                cell.fill = row_fill
+    ws.append(EXPORT_COLUMNS)
+
+    head_fill = PatternFill(start_color="161B22", end_color="161B22", fill_type="solid")
+    head_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    for c in range(1, len(EXPORT_COLUMNS) + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill, cell.font = head_fill, head_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    clean = df.astype(object).where(pd.notna(df), None)
+    for i, rec in enumerate(clean.to_dict("records"), start=2):
+        ws.append([rec[c] for c in EXPORT_COLUMNS])
+        hex_fill = _ROW_FILL.get(rec["_key"])
+        fill = PatternFill(start_color=hex_fill, end_color=hex_fill, fill_type="solid") if hex_fill else None
+        for j, name in enumerate(EXPORT_COLUMNS, start=1):
+            cell = ws.cell(row=i, column=j)
             cell.alignment = Alignment(vertical="center")
+            if fill:
+                cell.fill = fill
+            if name in _PRICE_COLS or name in _NUM2_COLS:
+                cell.number_format = "#,##0.00"
+            elif name == "Delivery %":
+                cell.number_format = "0.0"
 
     for col in ws.columns:
-        max_len = max(len(str(cell.value or '')) for cell in col)
-        col_letter = get_column_letter(col[0].column)
-        ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
-        
-    output = io.BytesIO()
-    wb.save(output)
-    return output.getvalue()
+        letter = get_column_letter(col[0].column)
+        longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+        ws.column_dimensions[letter].width = min(max(longest + 3, 11), 60)
+    ws.freeze_panes = "C2"
+    ws.auto_filter.ref = ws.dimensions
 
-# ==========================================
-# 5. UI DISPLAY & DASHBOARD
-# ==========================================
-st.title("⚡ Institutional Smart Money Terminal")
-st.markdown(f"**Last Sync:** `{st.session_state.last_refresh_dt}` | **Market Regime:** `{regime_title}` ({regime_sub})")
+    meta_ws = wb.create_sheet("Framework_Meta")
+    for line in [
+        ("Generated (IST)", meta["generated"]),
+        ("Price source", meta["source"]),
+        ("Market regime", meta["regime"]),
+        ("Pillar 1", "Trade only sectors with institutional capital INFLOW"),
+        ("Pillar 2", f"Delivery >= {MIN_DELIVERY_PCT:.0f}% and Spurt >= {MIN_SPURT:.1f}x"),
+        ("Pillar 3", "Entry only on a CLOSED 15m candle above the CHoCH trigger (no breakout chase)"),
+        ("T1 / T2 / T3", "+8-12% (SL to cost) / +18-25% (1.272 fib, partial) / +30-45% (1.618 fib, exit)"),
+        ("Note", "R:R and target % are measured from the CHoCH trigger. Educational tool, not investment advice."),
+    ]:
+        meta_ws.append(list(line))
+    meta_ws.column_dimensions["A"].width = 18
+    meta_ws.column_dimensions["B"].width = 100
+    for r in meta_ws.iter_rows(min_row=1, max_col=1):
+        r[0].font = Font(bold=True)
 
-# Summary Metrics Bar
-m1, m2, m3, m4 = st.columns(4)
-total_stocks = len(df_terminal)
-entered_stocks = len(df_terminal[df_terminal["Trade Action"] == "ACT: ENTERED"])
-waiting_stocks = len(df_terminal[df_terminal["Trade Action"] == "NEW WATCHLIST"])
-inflow_aligned = len(df_terminal[df_terminal["Sector Alignment"].str.contains("Inflow", na=False)])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
-m1.metric("Tracked Stocks", total_stocks)
-m2.metric("CHoCH Triggered", entered_stocks)
-m3.metric("Absorption (Wait)", waiting_stocks)
-m4.metric("Inflow Aligned", inflow_aligned)
 
-st.markdown("---")
+# ==========================================================
+# TRADE BOOK (persistence + exit rules)
+# ==========================================================
+def load_trades() -> list[dict]:
+    if os.path.exists(TRADE_BOOK_PATH):
+        try:
+            with open(TRADE_BOOK_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+    return []
 
-tab1, tab2 = st.tabs(["📊 Live Accumulation Radar", "📥 Export & Reports"])
 
-with tab1:
-    st.subheader("Smart Money Delivery Spurt & Trigger Radar")
-    
-    display_df = df_terminal[[
-        "Symbol", "Company", "Sector", "CMP (Rs)", "Smart Money Buy Range (Rs)",
-        "CHoCH Trigger (Rs)", "Support / TSL (Rs)", "Target 1", "Target 2", "Target 3",
-        "Volume Spurt", "Recent Deliv %", "Live Status", "Trade Action", "SMC Structure"
-    ]]
-    
-    st.dataframe(display_df, use_container_width=True, height=550)
+def save_trades(trades: list[dict]) -> bool:
+    try:
+        os.makedirs(os.path.dirname(TRADE_BOOK_PATH), exist_ok=True)
+        tmp = TRADE_BOOK_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(trades, f, indent=2)
+        os.replace(tmp, TRADE_BOOK_PATH)  # atomic: no half-written file
+        return True
+    except OSError:
+        return False
 
-with tab2:
-    st.subheader("Download Audited Radar Data")
-    excel_data = generate_excel_export(df_terminal)
+
+def position_action(t: dict, cmp_: float | None) -> tuple[str, float]:
+    """Returns (action text, active stop-loss). After T1 the SL is trailed to cost."""
+    active_sl = t["entry_price"] if t["t1_hit"] else t["initial_sl"]
+    if cmp_ is None:
+        return "📴 NO LIVE DATA", active_sl
+    if cmp_ <= active_sl:
+        return ("🔴 EXIT – SL AT COST HIT" if t["t1_hit"] else "🔴 EXIT – INITIAL SL HIT"), active_sl
+    if cmp_ >= t["t3"]:
+        return "🏁 T3 – PEAK EXIT", active_sl
+    if t["t2_hit"]:
+        return "🟡 T2 REACHED – PARTIAL PROFIT LOCKED", active_sl
+    if t["t1_hit"]:
+        return "🟢 T1 REACHED – SL AT COST (ZERO RISK)", active_sl
+    return "⏳ HOLD", active_sl
+
+
+def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
+    st.subheader("Position Tracker – exit rules from framework")
+    st.caption("T1 hit → stop-loss trails to cost. T2 → partial profit. T3 → peak exit. "
+               "Hits are latched when this page loads with live data; the file lives on the server disk, so keep a backup.")
+
+    trades: list[dict] = st.session_state.trades
+    symbols = radar["symbol"].tolist()
+    sym = st.selectbox("Symbol", symbols, key="tb_symbol")
+    row = radar.loc[radar["symbol"] == sym].iloc[0]
+    q = quotes.get(sym)
+    default_entry = float(q["cmp"]) if q else float(row["snap_cmp"])
+
+    with st.form("tb_add_form"):
+        c1, c2, c3 = st.columns(3)
+        entry = c1.number_input("Entry price (Rs)", min_value=0.01, value=round(default_entry, 2), step=0.05, key=f"tb_entry_{sym}")
+        qty = c2.number_input("Quantity", min_value=1, value=1, step=1, key=f"tb_qty_{sym}")
+        sl = c3.number_input("Initial stop-loss (Rs)", min_value=0.01, value=float(row["support"]), step=0.05, key=f"tb_sl_{sym}")
+        add = st.form_submit_button("➕ Log trade", **STRETCH)
+    if add:
+        if sl >= entry:
+            st.error("Stop-loss must be below the entry price.")
+        else:
+            trades.append({
+                "id": uuid.uuid4().hex[:8], "symbol": sym,
+                "entry_price": float(entry), "qty": int(qty), "initial_sl": float(sl),
+                "t1": float(row["t1"]), "t2": float(row["t2"]), "t3": float(row["t3"]),
+                "t1_hit": False, "t2_hit": False,
+                "entry_date": now_ist().strftime("%Y-%m-%d %H:%M"),
+                "status": "OPEN", "exit_price": None, "exit_date": None,
+            })
+            if not save_trades(trades):
+                st.warning("Trade logged for this session, but saving to disk failed.")
+            st.success(f"{sym} logged.")
+
+    open_trades = [t for t in trades if t["status"] == "OPEN"]
+    changed = False
+    rows = []
+    for t in open_trades:
+        qd = quotes.get(t["symbol"])
+        cmp_ = qd["cmp"] if qd else None
+        if cmp_ is not None:
+            if not t["t1_hit"] and cmp_ >= t["t1"]:
+                t["t1_hit"], changed = True, True
+            if not t["t2_hit"] and cmp_ >= t["t2"]:
+                t["t1_hit"] = t["t2_hit"] = changed = True
+        action, active_sl = position_action(t, cmp_)
+        pnl = (cmp_ - t["entry_price"]) * t["qty"] if cmp_ is not None else None
+        pnl_pct = (cmp_ / t["entry_price"] - 1) * 100 if cmp_ is not None else None
+        rows.append({
+            "ID": t["id"], "Symbol": t["symbol"], "Entry Date": t["entry_date"],
+            "Entry (Rs)": t["entry_price"], "Qty": t["qty"], "CMP (Rs)": cmp_,
+            "P&L (Rs)": pnl, "P&L %": pnl_pct, "Active SL (Rs)": active_sl,
+            "T1": t["t1"], "T2": t["t2"], "T3": t["t3"], "Action": action,
+        })
+    if changed:
+        save_trades(trades)
+
+    st.markdown("**Open positions**")
+    if rows:
+        pos_df = pd.DataFrame(rows)
+        st.dataframe(pos_df, hide_index=True, **STRETCH)
+        total = pos_df["P&L (Rs)"].dropna().sum()
+        st.metric("Open P&L (Rs)", f"{total:,.2f}")
+
+        with st.form("tb_close_form"):
+            labels = {f"{t['symbol']} | {t['qty']} @ {t['entry_price']:.2f} | {t['id']}": t["id"] for t in open_trades}
+            pick = st.selectbox("Close position", list(labels.keys()))
+            exit_px = st.number_input("Exit price (Rs)", min_value=0.01, value=1.0, step=0.05)
+            close = st.form_submit_button("Close position", **STRETCH)
+        if close:
+            tid = labels[pick]
+            for t in trades:
+                if t["id"] == tid:
+                    t["status"], t["exit_price"] = "CLOSED", float(exit_px)
+                    t["exit_date"] = now_ist().strftime("%Y-%m-%d %H:%M")
+            save_trades(trades)
+            st.rerun()
+    else:
+        st.info("No open positions.")
+
+    closed = [t for t in trades if t["status"] == "CLOSED"]
+    if closed:
+        st.markdown("**Closed trades**")
+        cdf = pd.DataFrame([{
+            "Symbol": t["symbol"], "Entry (Rs)": t["entry_price"], "Exit (Rs)": t["exit_price"], "Qty": t["qty"],
+            "Realised P&L (Rs)": (t["exit_price"] - t["entry_price"]) * t["qty"],
+            "Return %": (t["exit_price"] / t["entry_price"] - 1) * 100,
+            "Entry Date": t["entry_date"], "Exit Date": t["exit_date"],
+        } for t in closed])
+        st.dataframe(cdf, hide_index=True, **STRETCH)
+        st.metric("Realised P&L (Rs)", f"{cdf['Realised P&L (Rs)'].sum():,.2f}")
+
     st.download_button(
-        label="📥 Download Excel (.xlsx)",
-        data=excel_data,
-        file_name=f"SMC_Institutional_Radar_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+        "💾 Download trade book backup (JSON)",
+        data=json.dumps(trades, indent=2),
+        file_name="active_trades_backup.json", mime="application/json", **STRETCH,
     )
+
+
+# ==========================================================
+# UI
+# ==========================================================
+CSS = """
+<style>
+  div[data-testid="stMetric"]{background:#161B22;border:1px solid #30363D;padding:14px 18px;border-radius:6px;}
+  div[data-testid="stMetricLabel"]{color:#8B949E;font-size:13px;font-weight:600;text-transform:uppercase;}
+  div[data-testid="stMetricValue"]{color:#F0F6FC;font-family:'JetBrains Mono',Consolas,monospace;font-size:20px;font-weight:700;}
+  .stTabs [data-baseweb="tab-list"]{gap:8px;}
+  .stTabs [data-baseweb="tab"]{background-color:#161B22;border-radius:4px;color:#C9D1D9;padding:8px 16px;}
+  .stTabs [aria-selected="true"]{background-color:#21262D !important;color:#58A6FF !important;border-bottom:2px solid #58A6FF !important;}
+</style>
+"""
+
+COLUMN_CONFIG = {
+    "CMP (Rs)": st.column_config.NumberColumn(format="%.2f"),
+    "Day %": st.column_config.NumberColumn(format="%.2f"),
+    "CHoCH Trigger (Rs)": st.column_config.NumberColumn(format="%.2f"),
+    "Last 15m Close (Rs)": st.column_config.NumberColumn(format="%.2f"),
+    "Support / TSL (Rs)": st.column_config.NumberColumn(format="%.2f"),
+    "Target 1": st.column_config.NumberColumn(format="%.2f"),
+    "Target 2": st.column_config.NumberColumn(format="%.2f"),
+    "Target 3": st.column_config.NumberColumn(format="%.2f"),
+    "T1 %": st.column_config.NumberColumn(format="%.1f"),
+    "T2 %": st.column_config.NumberColumn(format="%.1f"),
+    "T3 %": st.column_config.NumberColumn(format="%.1f"),
+    "R:R (T1)": st.column_config.NumberColumn(format="%.2f"),
+    "Volume Spurt (x)": st.column_config.NumberColumn(format="%.2f"),
+    "Delivery %": st.column_config.NumberColumn(format="%.1f"),
+}
+
+
+def main() -> None:
+    st.set_page_config(page_title="Institutional Smart Money Terminal", page_icon="⚡",
+                       layout="wide", initial_sidebar_state="expanded")
+    st.markdown(CSS, unsafe_allow_html=True)
+    if not auth_gate():
+        st.stop()
+
+    if "trades" not in st.session_state:
+        st.session_state.trades = load_trades()
+
+    # ---------------- sidebar ----------------
+    with st.sidebar:
+        st.header("⚙️ Controls")
+        if st.button("🔄 Refresh live data", **STRETCH):
+            st.cache_data.clear()
+            st.rerun()
+        max_chase = st.slider("Max extension above CHoCH (no-chase %)", 0.5, 5.0, 2.0, 0.5,
+                              help="If the last closed 15m candle is further above the trigger than this, it is treated as a chase, not an entry.")
+        tradable_only = st.toggle("Tradable only (Pillar 1 + 2 pass)", value=False)
+        status_filter = st.multiselect("Status filter", [
+            "⚡ ACTIVE", "🟠 EXTENDED", "🟢 IN BUY ZONE", "🟡 PRE-TRIGGER", "⚪ BELOW BUY ZONE",
+            "📴 NO LIVE DATA", "⚠️ LEVELS STALE", "❌ INVALIDATED", "⛔ BLOCKED",
+        ])
+        text_filter = st.text_input("Search symbol / company / sector").strip().lower()
+        if _master_password()[1]:
+            st.warning("Default password in use. Set TERMINAL_PASSWORD in secrets or env.")
+        if st.button("🔒 Lock terminal", **STRETCH):
+            st.session_state["authenticated"] = False
+            st.rerun()
+
+    # ---------------- data ----------------
+    radar = build_radar()
+    issues = validate_radar(radar)
+    live = fetch_live_quotes(tuple(radar["symbol"]))
+    quotes, fetched_at = live["quotes"], live["fetched_at"]
+    df = evaluate_setups(radar, quotes, max_chase)
+    regime = get_market_regime()
+    now = now_ist()
+    mkt = market_state(now)
+
+    live_ok = len(quotes)
+    source = (f"Live yfinance 15m ({live_ok}/{len(radar)} symbols)" if live_ok
+              else "Snapshot only – live feed unavailable")
+    if regime["ok"]:
+        regime_txt = (f"{regime['regime']} | Nifty {regime['nifty']:,.0f} ({fmt_pct(regime['nifty_chg'])}) "
+                      f"| Sensex {regime['sensex']:,.0f} ({fmt_pct(regime['sensex_chg'])})")
+    else:
+        regime_txt = "Unavailable (index feed failed)"
+
+    st.title("⚡ Institutional Smart Money Terminal")
+    st.markdown(f"**Last Sync:** `{fetched_at.strftime('%d-%b-%Y | %I:%M:%S %p IST')}` &nbsp;|&nbsp; "
+                f"**Market:** `{mkt}` &nbsp;|&nbsp; **Regime:** `{regime_txt}`")
+    if live_ok == 0:
+        st.error("Live prices unavailable – NO trigger can be confirmed. Showing radar snapshot only.")
+    elif live_ok < len(radar):
+        st.warning(f"Live data missing for {len(radar) - live_ok} symbol(s); they show 'NO LIVE DATA'.")
+    if mkt != "OPEN" and live_ok:
+        st.info("Market closed – CHoCH status reflects the last completed 15m candle. NSE holidays are not auto-detected. "
+                "Yahoo intraday data can lag the exchange; confirm on your broker before placing orders.")
+
+    # ---------------- metrics ----------------
+    m = st.columns(6)
+    m[0].metric("Tracked", len(df))
+    m[1].metric("Tradable (P1+P2)", int(df["_tradable"].sum()))
+    m[2].metric("⚡ Active Triggers", int((df["_key"] == "ACTIVE").sum()))
+    m[3].metric("In Buy Zone", int((df["_key"] == "ZONE").sum()))
+    m[4].metric("Inflow Aligned", int(df["Sector Flow"].str.contains("Inflow").sum()))
+    m[5].metric("Blocked", int((df["_key"] == "BLOCKED").sum()))
+    st.markdown("---")
+
+    # ---------------- filtered view ----------------
+    view = df.copy()
+    if tradable_only:
+        view = view[view["_tradable"]]
+    if status_filter:
+        pats = [s.split(" ", 1)[0] for s in status_filter]  # leading emoji
+        view = view[view["Status"].apply(lambda s: any(s.startswith(p) for p in pats))]
+    if text_filter:
+        blob = (view["Symbol"] + " " + view["Company"] + " " + view["Sector"]).str.lower()
+        view = view[blob.str.contains(text_filter, regex=False)]
+
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Live Accumulation Radar", "📒 Trade Book", "🧪 Data Quality", "📥 Export & Reports"])
+
+    with tab1:
+        st.subheader("Smart Money Delivery Spurt & 15m CHoCH Radar")
+        show_cols = [c for c in EXPORT_COLUMNS if c in view.columns]
+        st.dataframe(view[show_cols], hide_index=True, height=560, column_config=COLUMN_CONFIG, **STRETCH)
+        st.caption("Entry is valid only when the last COMPLETED 15m candle closes at/above the CHoCH trigger "
+                   "inside a Pillar 1 + 2 qualified name. Target % and R:R are measured from the CHoCH trigger.")
+
+    with tab2:
+        render_trade_book(radar, quotes)
+
+    with tab3:
+        st.subheader("Data integrity & framework fit")
+        if issues:
+            for i in issues:
+                st.warning(i)
+        else:
+            st.success("Radar levels are internally consistent (Support < Buy Low ≤ Buy High < CHoCH < T1 < T2 < T3).")
+        low_t1 = df[df["T1 %"] < 8.0]
+        low_rr = df[df["R:R (T1)"] < 1.5]
+        st.markdown(f"- **T1 below framework band (< +8% from trigger):** {len(low_t1)} of {len(df)}")
+        st.markdown(f"- **R:R to T1 below 1.5:** {len(low_rr)} of {len(df)}")
+        st.caption("These are not bugs in the app – they are the radar's own target/support levels. "
+                   "Re-derive T1/T2/T3 from swing high and 1.272 / 1.618 extensions, or skip the weak-R:R names.")
+        stale = df[df["_key"] == "STALE"]
+        if not stale.empty:
+            st.error("Live price is >15% away from the radar snapshot for: " + ", ".join(stale["Symbol"]) +
+                     ". Either the levels are old or the ticker mapping is wrong – verify before trading.")
+        st.dataframe(
+            df[["Symbol", "T1 %", "T2 %", "T3 %", "R:R (T1)", "Delivery %", "Volume Spurt (x)", "Tradable (3-Pillar)"]],
+            hide_index=True, column_config=COLUMN_CONFIG, **STRETCH,
+        )
+
+    with tab4:
+        st.subheader("Download Audited Radar Data")
+        meta = {"generated": now.strftime("%d-%b-%Y %I:%M:%S %p IST"), "source": source, "regime": regime_txt}
+        xlsx = generate_excel_export(df, meta)
+        st.download_button(
+            "📥 Download Excel (.xlsx)", data=xlsx,
+            file_name=f"SMC_Institutional_Radar_{now.strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", **STRETCH,
+        )
+        st.caption("Export contains the full (unfiltered) radar, row-coloured by status.")
+
+
+if __name__ == "__main__":
+    main()
