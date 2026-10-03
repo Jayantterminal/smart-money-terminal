@@ -437,29 +437,71 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
 FRESH_SET = ("Spike today", "Spike (last 3D)", "Building (5D)")
 
 
-def sector_rotation(scr: pd.DataFrame, min_stocks: int = 3) -> pd.DataFrame:
-    d = scr[~scr.Sector.isin(["Other", "-"])]
-    rows = []
-    for sec, g in d.groupby("Sector"):
-        n = len(g)
-        if n < min_stocks:
-            continue
-        acc = int(g.Signal.isin(["Strong Accumulation", "Accumulation"]).sum())
-        f1, f0 = float(g.Net_Flow_1M.mean()), float(g.Net_Flow_3M.mean())
-        chg = f1 - f0
-        quad = ("Leading" if f1 > 0 and chg > 0 else "Weakening" if f1 > 0 else
-                "Improving" if chg > 0 else "Lagging")
-        rows.append({
-            "Sector": sec, "Stocks": n, "Accumulating": acc, "Acc_Pct": round(acc / n * 100),
-            "Strong": int((g.Signal == "Strong Accumulation").sum()),
-            "Continuing": int((g.Buying_Status == "Continuing").sum()),
-            "Fresh": int(g.Fresh.isin(FRESH_SET).sum()),
-            "Flow_1M": round(f1, 1), "Flow_Prev": round(f0, 1), "Flow_Chg": round(chg, 1),
-            "Deliv_Qty_X": round(float(g.Deliv_Qty_X.median()), 2),
-            "Ret_1W": round(float(g.Ret_1W.median()), 1), "Ret_1M": round(float(g.Ret_1M.median()), 1),
-            "Ret_3M": round(float(g.Ret_3M.median()), 1), "Quadrant": quad,
-        })
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    return df.sort_values(["Acc_Pct", "Flow_1M"], ascending=False).reset_index(drop=True)
+def sector_rotation(pool: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate per-stock accumulation metrics to sector level.
+    pool must have: Symbol, Sector, Signal, Net_Flow_1M, Net_Flow_3M.
+    Optional: Buying_Status, Fresh, Deliv_Qty_X, Ret_1W, Ret_1M, Ret_3M.
+    """
+    if pool is None or pool.empty:
+        return pd.DataFrame()
+
+    for c in ["Sector", "Signal", "Net_Flow_1M", "Net_Flow_3M"]:
+        if c not in pool.columns:
+            return pd.DataFrame()
+
+    d = pool.copy()
+    d["Sector"] = d["Sector"].fillna("Unknown").astype(str).str.strip()
+    d.loc[d.Sector.isin(["", "nan", "None", "NaN"]), "Sector"] = "Unknown"
+
+    for c in ["Net_Flow_1M", "Net_Flow_3M", "Deliv_Qty_X", "Ret_1W", "Ret_1M", "Ret_3M"]:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+
+    acc_signals = {"Accumulation", "Strong Accumulation"}
+    d["_is_acc"]  = d.Signal.isin(acc_signals)
+    d["_is_str"]  = d.Signal.eq("Strong Accumulation")
+    d["_is_cont"] = (d["Buying_Status"].eq("Continuing")
+                     if "Buying_Status" in d.columns
+                     else pd.Series(False, index=d.index))
+    d["_is_fresh"] = (d["Fresh"].isin(FRESH_SET)
+                      if "Fresh" in d.columns
+                      else pd.Series(False, index=d.index))
+
+    agg = {
+        "Stocks":       ("Symbol", "count"),
+        "Accumulating": ("_is_acc", "sum"),
+        "Strong":       ("_is_str", "sum"),
+        "Continuing":   ("_is_cont", "sum"),
+        "Fresh":        ("_is_fresh", "sum"),
+        "Flow_1M":      ("Net_Flow_1M", "mean"),
+        "Flow_Prev":    ("Net_Flow_3M", "mean"),
+    }
+    if "Deliv_Qty_X" in d.columns:
+        agg["Deliv_Qty_X"] = ("Deliv_Qty_X", "mean")
+    for c in ["Ret_1W", "Ret_1M", "Ret_3M"]:
+        if c in d.columns:
+            agg[c] = (c, "median")
+
+    g = d.groupby("Sector", dropna=False).agg(**agg).reset_index()
+
+    g["Acc_Pct"]   = (100 * g.Accumulating / g.Stocks.replace(0, np.nan)).round(0).fillna(0).astype(int)
+    g["Flow_1M"]   = g.Flow_1M.round(2)
+    g["Flow_Prev"] = g.Flow_Prev.round(2)
+    g["Flow_Chg"]  = (g.Flow_1M - g.Flow_Prev).round(2)
+
+    def _q(row):
+        f, ch = row.Flow_1M, row.Flow_Chg
+        if pd.isna(f) or pd.isna(ch): return "Lagging"
+        if f >= 0 and ch >= 0: return "Leading"
+        if f <  0 and ch >= 0: return "Improving"
+        if f >= 0 and ch <  0: return "Weakening"
+        return "Lagging"
+
+    g["Quadrant"] = g.apply(_q, axis=1)
+
+    cols = ["Sector", "Quadrant", "Stocks", "Accumulating", "Strong", "Continuing", "Fresh",
+            "Acc_Pct", "Flow_1M", "Flow_Prev", "Flow_Chg", "Deliv_Qty_X",
+            "Ret_1W", "Ret_1M", "Ret_3M"]
+    cols = [c for c in cols if c in g.columns]
+    return g[cols].sort_values(["Flow_Chg", "Flow_1M"], ascending=False).reset_index(drop=True)
