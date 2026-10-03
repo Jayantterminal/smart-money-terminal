@@ -1,8 +1,8 @@
 """
-Institutional Smart Money Terminal (v3.0 - Full Suite)
----------------------------------------------------------
+Institutional Smart Money Terminal (v3.2 - 22 NSE Sectors Complete)
+------------------------------------------------------------------
 Framework (Three-Pillar Institutional SMC):
-  Pillar 1: Sector Capital Rotation Matrix (Inflow vs Outflow)
+  Pillar 1: Full 22 NSE Sector Capital Rotation Matrix (Inflow vs Outflow)
   Pillar 2: Cash Delivery Spurt Filter (Deliv >= 45%, Spurt >= 2.0x)
   Pillar 3: Micro Execution Engine:
             - Bullish: Smart Money Accumulation Zone, 15m CHoCH, Bullish BOS
@@ -38,25 +38,32 @@ MAX_LOGIN_ATTEMPTS = 5
 LEGACY_PASSWORD = "2000"
 TRADE_BOOK_PATH = "data/active_trades.json"
 
-# Pillar 1 - 6-Fortnight Institutional Capital Shift Tracker
+# Pillar 1 - Complete 22 NSE Institutional Capital Flow & Sector Rotation Matrix
 SECTOR_FLOW_MATRIX = {
-    "Financial Services": {"status": True, "shift": "+2.8x Inflow", "fortnights_trend": "Inflow Accumulation"},
-    "Oil Gas & Consumable Fuels": {"status": True, "shift": "+2.1x Inflow", "fortnights_trend": "Sustained Inflow"},
-    "Consumer Services": {"status": True, "shift": "+1.9x Inflow", "fortnights_trend": "New Rotation Entry"},
-    "Construction Materials": {"status": True, "shift": "+1.7x Inflow", "fortnights_trend": "Inflow Accumulation"},
-    "Construction": {"status": True, "shift": "+1.5x Inflow", "fortnights_trend": "Early Inflow Stage"},
-    "Healthcare": {"status": True, "shift": "+1.4x Inflow", "fortnights_trend": "Defensive Inflow"},
-    "Capital Goods": {"status": False, "shift": "-1.8x Outflow", "fortnights_trend": "Capital Outflow"},
-    "Automobile and Auto Components": {"status": False, "shift": "-2.2x Outflow", "fortnights_trend": "Distribution Phase"},
-    "Chemicals": {"status": False, "shift": "-1.5x Outflow", "fortnights_trend": "Outflow Markdown"},
-    "Consumer Durables": {"status": False, "shift": "-1.3x Outflow", "fortnights_trend": "Outflow Phase"},
-    "Information Technology": {"status": False, "shift": "-2.6x Outflow", "fortnights_trend": "Aggressive Outflow"},
-    "Fast Moving Consumer Goods": {"status": False, "shift": "-1.1x Outflow", "fortnights_trend": "Capital Pullout"},
+    "Financial Services": {"recent_share": 29.01, "base_share": 26.50, "shift": 2.51, "signal": "Heavy Inflow", "status": True},
+    "Healthcare": {"recent_share": 8.13, "base_share": 7.45, "shift": 0.68, "signal": "Heavy Inflow", "status": True},
+    "Construction Materials": {"recent_share": 1.23, "base_share": 1.14, "shift": 0.09, "signal": "Inflow", "status": True},
+    "Power": {"recent_share": 3.03, "base_share": 2.97, "shift": 0.06, "signal": "Inflow", "status": True},
+    "Consumer Services": {"recent_share": 5.86, "base_share": 5.81, "shift": 0.05, "signal": "Inflow", "status": True},
+    "Oil Gas & Consumable Fuels": {"recent_share": 4.74, "base_share": 4.69, "shift": 0.05, "signal": "Inflow", "status": True},
+    "Construction": {"recent_share": 1.62, "base_share": 1.59, "shift": 0.03, "signal": "Inflow", "status": True},
+    "Forest Materials": {"recent_share": 0.02, "base_share": 0.02, "shift": 0.00, "signal": "Outflow", "status": False},
+    "Diversified": {"recent_share": 0.01, "base_share": 0.02, "shift": -0.01, "signal": "Outflow", "status": False},
+    "Textiles": {"recent_share": 0.38, "base_share": 0.39, "shift": -0.01, "signal": "Outflow", "status": False},
+    "Media Entertainment & Publication": {"recent_share": 0.42, "base_share": 0.45, "shift": -0.03, "signal": "Outflow", "status": False},
+    "Chemicals": {"recent_share": 2.50, "base_share": 2.56, "shift": -0.06, "signal": "Outflow", "status": False},
+    "Utilities": {"recent_share": 0.12, "base_share": 0.21, "shift": -0.09, "signal": "Outflow", "status": False},
+    "Telecommunication": {"recent_share": 2.88, "base_share": 2.99, "shift": -0.11, "signal": "Outflow", "status": False},
+    "Metals & Mining": {"recent_share": 3.45, "base_share": 3.60, "shift": -0.15, "signal": "Outflow", "status": False},
+    "Services": {"recent_share": 1.10, "base_share": 1.30, "shift": -0.20, "signal": "Outflow", "status": False},
+    "Consumer Durables": {"recent_share": 2.15, "base_share": 2.45, "shift": -0.30, "signal": "Outflow", "status": False},
+    "Fast Moving Consumer Goods": {"recent_share": 7.80, "base_share": 8.25, "shift": -0.45, "signal": "Outflow", "status": False},
+    "Capital Goods": {"recent_share": 6.10, "base_share": 6.85, "shift": -0.75, "signal": "Heavy Outflow", "status": False},
+    "Automobile and Auto Components": {"recent_share": 5.40, "base_share": 6.30, "shift": -0.90, "signal": "Heavy Outflow", "status": False},
+    "Information Technology": {"recent_share": 11.20, "base_share": 12.45, "shift": -1.25, "signal": "Heavy Outflow", "status": False},
+    "Realty": {"recent_share": 0.85, "base_share": 0.95, "shift": -0.10, "signal": "Outflow", "status": False},
 }
 
-SECTOR_FLOW = {k: v["status"] for k, v in SECTOR_FLOW_MATRIX.items()}
-
-# Master Universe (Bullish & Bearish SMC Parameters)
 RADAR_COLUMNS = [
     "symbol", "company", "sector", "bias", "snap_cmp", 
     "zone_low", "zone_high", "choch", "bos", "invalidation",
@@ -64,7 +71,6 @@ RADAR_COLUMNS = [
 ]
 
 RADAR_ROWS = [
-    # Bullish Inflow Aligned Setups
     ("CASTROLIND", "Castrol India Ltd.", "Oil Gas & Consumable Fuels", "BULLISH", 199.04, 196.00, 201.00, 204.50, 209.00, 191.00, 215.00, 226.00, 240.00, "Cash delivery absorption near support", 2.12, 57.4, 1),
     ("BAJAJFINSV", "Bajaj Finserv Ltd.", "Financial Services", "BULLISH", 1732.60, 1715.00, 1745.00, 1785.00, 1820.00, 1680.00, 1920.00, 2040.00, 2180.00, "Lending momentum & institutional blocks", 2.35, 62.0, 1),
     ("BAJAJHFL", "Bajaj Housing Finance Ltd.", "Financial Services", "BULLISH", 82.91, 81.80, 83.60, 86.40, 89.50, 79.50, 95.00, 102.00, 110.00, "Post-listing discount base accumulation", 2.90, 61.2, 1),
@@ -83,8 +89,6 @@ RADAR_ROWS = [
     ("SHREECEM", "Shree Cement Ltd.", "Construction Materials", "BULLISH", 21900.00, 21700.00, 22100.00, 22650.00, 23200.00, 21350.00, 23800.00, 24900.00, 26200.00, "Low base valuation accumulation", 3.47, 51.9, 1),
     ("PNCINFRA", "PNC Infratech Ltd.", "Construction", "BULLISH", 138.16, 136.00, 139.50, 143.90, 148.00, 128.40, 152.00, 162.00, 175.00, "Highway order book spurt", 3.77, 45.4, 1),
     ("NATCOPHARM", "Natco Pharma Ltd.", "Healthcare", "BULLISH", 1410.00, 1395.00, 1425.00, 1450.00, 1485.00, 1365.00, 1540.00, 1620.00, 1700.00, "US formulation approval absorption", 2.85, 61.0, 1),
-
-    # Bearish / Outflow Breakdown Setups
     ("COFORGE", "Coforge Ltd.", "Information Technology", "BEARISH", 7850.00, 7920.00, 7780.00, 7650.00, 7520.00, 8100.00, 7300.00, 7050.00, 6800.00, "IT Sector Outflow: Distribution breakdown", 2.30, 50.5, 1),
     ("IKS", "IKS Health", "Information Technology", "BEARISH", 1420.00, 1435.00, 1400.00, 1380.00, 1350.00, 1475.00, 1310.00, 1260.00, 1200.00, "Sector capital exit, lower-high rejection", 2.20, 48.1, 1),
     ("BAJAJ-AUTO", "Bajaj Auto Ltd.", "Automobile and Auto Components", "BEARISH", 10045.00, 10120.00, 9950.00, 9820.00, 9650.00, 10380.00, 9350.00, 9050.00, 8700.00, "Auto sector liquidity sweep & distribution", 2.25, 53.0, 1),
@@ -254,12 +258,11 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
         cmp_ = q["cmp"] if q else None
         last_close = q["last_close"] if q else None
 
-        flow_info = SECTOR_FLOW_MATRIX.get(r["sector"], {"status": None, "shift": "Unmapped"})
+        flow_info = SECTOR_FLOW_MATRIX.get(r["sector"], {"status": None, "shift": 0.0, "signal": "Unmapped"})
         flow_status = flow_info["status"]
-        flow_label = f"☑️ Inflow ({flow_info['shift']})" if flow_status is True else f"⚠️ Outflow ({flow_info['shift']})"
+        flow_label = f"☑️ Inflow (+{flow_info['shift']}%)" if flow_status is True else f"⚠️ Outflow ({flow_info['shift']}%)"
         
         p2_pass = r["deliv"] >= MIN_DELIVERY_PCT and r["spurt"] >= MIN_SPURT
-        # Bullish setups require Sector Inflow; Bearish setups track Sector Outflow
         tradable = (flow_status is True and p2_pass) if bias == "BULLISH" else (flow_status is False and p2_pass)
 
         entry_ref = r["choch"]
@@ -272,12 +275,10 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
         dev_pct = (cmp_ / r["snap_cmp"] - 1) * 100 if cmp_ is not None else None
         day_pct = (cmp_ / q["prev_close"] - 1) * 100 if q and q.get("prev_close") else None
 
-        # Logic for Bullish vs Bearish Structure
         if cmp_ is None or last_close is None:
             key, status, action = "NODATA", "📴 NO LIVE DATA", "WAIT – FEED UNAVAILABLE"
         elif abs(cmp_ / r["snap_cmp"] - 1) * 100 > stale_pct:
             key, status, action = "STALE", "⚠️ LEVELS STALE", "REFRESH RADAR SNAPSHOT"
-        
         elif bias == "BULLISH":
             if flow_status is not True:
                 key, status, action = "BLOCKED", "⛔ BLOCKED – Sector Outflow", "AVOID LONGS (Pillar 1)"
@@ -300,7 +301,6 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
                 action = "CHoCH TOUCHED – WAIT 15m CLOSE" if cmp_ >= r["choch"] else "WATCHING NEAR TRIGGER"
             else:
                 key, status, action = "BELOW", "⚪ BELOW BUY ZONE", "TRACKING"
-
         else: # BEARISH
             if flow_status is not False:
                 key, status, action = "BLOCKED", "⛔ BLOCKED – Sector Inflow", "AVOID SHORTS (Pillar 1)"
@@ -335,7 +335,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
     return df.sort_values(["_rank", "Volume Spurt (x)"], ascending=[True, False]).reset_index(drop=True)
 
 # ==========================================================
-# EXCEL GENERATOR (MAINTAINED AS AN OPTION)
+# EXCEL GENERATOR (OFFLINE EXPORT OPTION)
 # ==========================================================
 EXPORT_COLUMNS = [
     "Symbol", "Company", "Sector", "Bias", "Sector Flow", "Tradable (3-Pillar)", "Status", "Action",
@@ -392,7 +392,7 @@ def save_trades(trades):
         json.dump(trades, f, indent=2)
 
 # ==========================================================
-# USER INTERFACE
+# UI STYLING & ENTRYPOINT
 # ==========================================================
 CSS = """
 <style>
@@ -421,6 +421,12 @@ COLUMN_CONFIG = {
     "R:R (T1)": st.column_config.NumberColumn(format="%.2f"),
     "Volume Spurt (x)": st.column_config.NumberColumn(format="%.2f"),
     "Delivery %": st.column_config.NumberColumn(format="%.1f"),
+}
+
+SECTOR_CONFIG = {
+    "Recent 12D Share (%)": st.column_config.NumberColumn(format="%.2f%%"),
+    "Base Share (%)": st.column_config.NumberColumn(format="%.2f%%"),
+    "Flow Shift (%)": st.column_config.NumberColumn(format="%+.2f%%"),
 }
 
 def main():
@@ -452,11 +458,9 @@ def main():
     mkt = market_state(now)
     regime_txt = f"{regime['regime']} | Nifty {regime['nifty']:,.0f} ({fmt_pct(regime['nifty_chg'])})" if regime["ok"] else "Index feed offline"
 
-    # Terminal Header
     st.title("⚡ Institutional Smart Money Terminal")
     st.markdown(f"**Last Sync:** `{fetched_at.strftime('%d-%b-%Y | %I:%M:%S %p IST')}` | **Market:** `{mkt}` | **Regime:** `{regime_txt}`")
 
-    # Metric Row (Preserving Layout)
     m = st.columns(6)
     m[0].metric("Tracked", len(df))
     m[1].metric("Tradable (P1+P2)", int(df["_tradable"].sum()))
@@ -466,7 +470,6 @@ def main():
     m[5].metric("Blocked", int((df["_key"] == "BLOCKED").sum()))
     st.markdown("---")
 
-    # Filtered DataFrame
     view = df.copy()
     if bias_filter == "BULLISH Setups Only":
         view = view[view["Bias"] == "BULLISH"]
@@ -487,29 +490,40 @@ def main():
 
     with tab1:
         st.subheader("Smart Money Delivery Spurt & 15m CHoCH / BOS Radar")
-        st.caption("Pillar 3 Rule: Bullish entry requires closed 15m candle > CHoCH. Bullish BOS marks continuation. Bearish marks markdown distribution.")
+        st.caption("Bullish: Valid on completed 15m candle close > CHoCH. Bullish BOS marks expansion. Bearish tracks markdown breakdown.")
         show_cols = [c for c in EXPORT_COLUMNS if c in view.columns]
         st.dataframe(view[show_cols], hide_index=True, height=560, column_config=COLUMN_CONFIG, **STRETCH)
 
     with tab2:
-        st.subheader("Pillar 1: 6-Fortnights Sector Capital Rotation Matrix")
-        st.caption("Capital flow dictates market trend. Only plan Longs in Net Inflow sectors and Shorts/Exits in Net Outflow sectors.")
+        st.subheader("Pillar 1: NSE Institutional Capital Flow & Sector Rotation (22 Sectors)")
+        st.caption("Tracked across 6 fortnights. Institutional capital rule: Trade Longs ONLY in Inflow sectors, avoid or hedge in Outflow sectors.")
         
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("#### 🟢 Institutional INFLOW Sectors (+Shift)")
-            inflow_data = [{"Sector": k, "Flow Shift": v["shift"], "Institutional Trend": v["fortnights_trend"]} 
-                           for k, v in SECTOR_FLOW_MATRIX.items() if v["status"]]
-            st.dataframe(pd.DataFrame(inflow_data), hide_index=True, **STRETCH)
-        with c2:
-            st.markdown("#### 🔴 Institutional OUTFLOW Sectors (-Shift)")
-            outflow_data = [{"Sector": k, "Flow Shift": v["shift"], "Institutional Trend": v["fortnights_trend"]} 
-                            for k, v in SECTOR_FLOW_MATRIX.items() if not v["status"]]
-            st.dataframe(pd.DataFrame(outflow_data), hide_index=True, **STRETCH)
+        sector_records = []
+        for s_name, s_val in SECTOR_FLOW_MATRIX.items():
+            sector_records.append({
+                "Sector": s_name,
+                "Recent 12D Share (%)": s_val["recent_share"],
+                "Base Share (%)": s_val["base_share"],
+                "Flow Shift (%)": s_val["shift"],
+                "Flow Signal": "🟢 " + s_val["signal"] if s_val["status"] else "🔴 " + s_val["signal"],
+                "_status": s_val["status"]
+            })
+        sec_df = pd.DataFrame(sector_records).sort_values("Flow Shift (%)", ascending=False).reset_index(drop=True)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("#### 🟢 Institutional INFLOW Sectors")
+            inflow_view = sec_df[sec_df["_status"]][["Sector", "Recent 12D Share (%)", "Base Share (%)", "Flow Shift (%)", "Flow Signal"]]
+            st.dataframe(inflow_view, hide_index=True, column_config=SECTOR_CONFIG, **STRETCH)
+
+        with col_b:
+            st.markdown("#### 🔴 Institutional OUTFLOW Sectors")
+            outflow_view = sec_df[~sec_df["_status"]][["Sector", "Recent 12D Share (%)", "Base Share (%)", "Flow Shift (%)", "Flow Signal"]]
+            st.dataframe(outflow_view, hide_index=True, column_config=SECTOR_CONFIG, **STRETCH)
 
     with tab3:
         st.subheader("📋 Audited Radar Data (Live On-Screen Audit)")
-        st.markdown("Complete audited institutional data. Aapko Excel download karne ki zaroorat nahi hai, sabhi parameters neeche live accessible hain:")
+        st.markdown("Excel kholne ki zaroorat nahi hai. Poora institutional structure live yahan audit kiya ja sakta hai:")
         st.dataframe(df[EXPORT_COLUMNS], hide_index=True, height=450, column_config=COLUMN_CONFIG, **STRETCH)
         
         st.markdown("---")
