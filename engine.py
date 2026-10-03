@@ -246,6 +246,10 @@ def _finish(lo, hi, sl, t1, t2, t3, status, extra=None):
     return out
 
 
+def _ret(c: pd.Series, n: int) -> float:
+    return round(float((c.iloc[-1] / c.iloc[-1 - n] - 1) * 100), 1) if len(c) > n else float("nan")
+
+
 def make_plan(g, setup, hi_c, lo_c, lo_low) -> dict:
     atr = _atr(g)
     close = float(g.CLOSE_PRICE.iloc[-1])
@@ -404,6 +408,7 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
         rows.append({
             "Symbol": sym, "Sector": sectors.get(sym) or SECTOR_OF.get(sym) or "Other", "Price": round(close, 2),
             "Chg_Pct": round(float((close / t.PREV_CLOSE - 1) * 100), 2),
+            "Ret_1W": _ret(c, 5), "Ret_1M": _ret(c, 21), "Ret_3M": _ret(c, 62),
             "Deliv_Per": round(float(t.DELIV_PER), 1), "Deliv_Per_1M": round(float(dp_1m), 1),
             "Deliv_Per_3M": round(float(dp_3m), 1), "Deliv_Per_Chg": round(float(pp), 1),
             "Deliv_Qty": int(t.DELIV_QTY), "Deliv_Qty_1M": int(dq_1m), "Deliv_Qty_3M": int(dq_3m),
@@ -424,3 +429,37 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
     if df.empty:
         return df
     return df.sort_values(["Score", "Deliv_Qty_X"], ascending=False).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Sector rotation (delivery-flow based): where is money coming in / shifting?
+# --------------------------------------------------------------------------- #
+FRESH_SET = ("Spike today", "Spike (last 3D)", "Building (5D)")
+
+
+def sector_rotation(scr: pd.DataFrame, min_stocks: int = 3) -> pd.DataFrame:
+    d = scr[~scr.Sector.isin(["Other", "-"])]
+    rows = []
+    for sec, g in d.groupby("Sector"):
+        n = len(g)
+        if n < min_stocks:
+            continue
+        acc = int(g.Signal.isin(["Strong Accumulation", "Accumulation"]).sum())
+        f1, f0 = float(g.Net_Flow_1M.mean()), float(g.Net_Flow_3M.mean())
+        chg = f1 - f0
+        quad = ("Leading" if f1 > 0 and chg > 0 else "Weakening" if f1 > 0 else
+                "Improving" if chg > 0 else "Lagging")
+        rows.append({
+            "Sector": sec, "Stocks": n, "Accumulating": acc, "Acc_Pct": round(acc / n * 100),
+            "Strong": int((g.Signal == "Strong Accumulation").sum()),
+            "Continuing": int((g.Buying_Status == "Continuing").sum()),
+            "Fresh": int(g.Fresh.isin(FRESH_SET).sum()),
+            "Flow_1M": round(f1, 1), "Flow_Prev": round(f0, 1), "Flow_Chg": round(chg, 1),
+            "Deliv_Qty_X": round(float(g.Deliv_Qty_X.median()), 2),
+            "Ret_1W": round(float(g.Ret_1W.median()), 1), "Ret_1M": round(float(g.Ret_1M.median()), 1),
+            "Ret_3M": round(float(g.Ret_3M.median()), 1), "Quadrant": quad,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return df.sort_values(["Acc_Pct", "Flow_1M"], ascending=False).reset_index(drop=True)
