@@ -1,14 +1,10 @@
 """
-Institutional Smart Money Terminal  (v2)
-----------------------------------------
+Institutional Smart Money Terminal (v2.1 - Production Fix)
+---------------------------------------------------------
 Framework (3 pillars):
   P1  Sector capital rotation  -> trade only sectors with institutional INFLOW
   P2  Cash delivery spurt      -> delivery % >= 45  AND  spurt >= 2.0x
-  P3  Buy range + 15m CHoCH    -> entry only on a CLOSED 15m candle above the CHoCH trigger
-
-Run:      streamlit run app.py
-Needs:    streamlit>=1.40, pandas, numpy, yfinance, openpyxl, requests(optional)
-Password: set TERMINAL_PASSWORD in .streamlit/secrets.toml (or env var).
+  P3  Buy range + 15m CHoCH    -> entry strictly on 15m candle close > CHoCH trigger
 """
 from __future__ import annotations
 
@@ -29,19 +25,17 @@ from openpyxl.utils import get_column_letter
 from packaging.version import Version
 
 # ==========================================================
-# CONSTANTS
+# CONSTANTS & RULES
 # ==========================================================
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30), name="IST")
-CANDLE_MIN = 15                 # CHoCH timeframe (minutes)
-MIN_DELIVERY_PCT = 45.0         # Pillar 2
-MIN_SPURT = 2.0                 # Pillar 2
-STALE_DEVIATION_PCT = 15.0      # live price vs radar snapshot -> levels considered stale
+CANDLE_MIN = 15
+MIN_DELIVERY_PCT = 45.0
+MIN_SPURT = 2.0
+STALE_DEVIATION_PCT = 15.0
 MAX_LOGIN_ATTEMPTS = 5
-LEGACY_PASSWORD = "2000"        # fallback ONLY if no secret/env var is configured
+LEGACY_PASSWORD = "2000"
 TRADE_BOOK_PATH = "data/active_trades.json"
 
-# Pillar 1 - single source of truth. True = institutional INFLOW, False = OUTFLOW.
-# Update this once per fortnight from your 6-fortnight rotation study.
 SECTOR_FLOW: dict[str, bool] = {
     "Oil Gas & Consumable Fuels": True,
     "Financial Services": True,
@@ -57,11 +51,11 @@ SECTOR_FLOW: dict[str, bool] = {
     "Fast Moving Consumer Goods": False,
 }
 
-# Accumulation universe (snapshot from Bhavcopy study).
 RADAR_COLUMNS = [
     "symbol", "company", "sector", "snap_cmp", "buy_low", "buy_high", "choch", "support",
     "t1", "t2", "t3", "remark", "spurt", "deliv", "age_days",
 ]
+
 RADAR_ROWS = [
     ("CASTROLIND", "Castrol India Ltd.", "Oil Gas & Consumable Fuels", 199.04, 196.00, 201.00, 204.50, 191.00, 215.00, 226.00, 240.00, "Strong cash delivery, deserve a spot on watchlist", 2.12, 57.4, 1),
     ("AIAENG", "AIA Engineering Ltd.", "Capital Goods", 3824.40, 3790.00, 3845.00, 3950.00, 3710.00, 4180.00, 4350.00, 4580.00, "Mining consumables order expansion, heavy block deals", 2.25, 52.4, 1),
@@ -98,17 +92,15 @@ RADAR_ROWS = [
     ("WESTLIFE", "Westlife Foodworld Ltd.", "Consumer Services", 588.05, 580.00, 594.00, 605.00, 568.00, 645.00, 680.00, 720.00, "Institutional block deal / heavy stake accumulation", 2.18, 49.9, 1),
 ]
 
-# status -> sort rank (lower = more actionable)
 RANK = {
     "ACTIVE": 0, "EXTENDED": 1, "ZONE": 2, "PRE": 3, "BELOW": 4,
     "NODATA": 5, "STALE": 6, "INVALID": 7, "BLOCKED": 8,
 }
 
 # ==========================================================
-# SMALL HELPERS
+# HELPERS
 # ==========================================================
 def _stretch_kwargs() -> dict:
-    """Streamlit >=1.50 prefers width='stretch'; older versions need use_container_width."""
     try:
         if Version(st.__version__) >= Version("1.50.0"):
             return {"width": "stretch"}
@@ -116,42 +108,34 @@ def _stretch_kwargs() -> dict:
         pass
     return {"use_container_width": True}
 
-
 STRETCH = _stretch_kwargs()
-
 
 def now_ist() -> dt.datetime:
     return dt.datetime.now(IST)
 
-
 def market_state(now: dt.datetime) -> str:
-    """Weekday + 09:15-15:30 IST check. NSE holiday calendar is NOT checked."""
     if now.weekday() >= 5:
         return "CLOSED (weekend)"
     if dt.time(9, 15) <= now.time() <= dt.time(15, 30):
         return "OPEN"
     return "CLOSED"
 
-
 def fmt_pct(x: float | None) -> str:
     return "n/a" if x is None or pd.isna(x) else f"{x:+.2f}%"
 
-
 # ==========================================================
-# AUTH
+# AUTHENTICATION GATE
 # ==========================================================
 def _master_password() -> tuple[str, bool]:
-    """Returns (password, is_default). Secret > env var > legacy fallback."""
     pwd = None
     try:
         pwd = st.secrets.get("TERMINAL_PASSWORD")
-    except Exception:  # no secrets.toml present
+    except Exception:
         pwd = None
     pwd = pwd or os.environ.get("TERMINAL_PASSWORD")
     if pwd:
         return str(pwd), False
     return LEGACY_PASSWORD, True
-
 
 def auth_gate() -> bool:
     st.session_state.setdefault("authenticated", False)
@@ -169,7 +153,7 @@ def auth_gate() -> bool:
         if submitted:
             master, _ = _master_password()
             if st.session_state["failed_attempts"] >= MAX_LOGIN_ATTEMPTS:
-                st.error("Too many failed attempts in this session. Reload the page to retry.")
+                st.error("Too many failed attempts in this session. Reload page.")
             elif hmac.compare_digest(pwd_in.encode("utf-8"), master.encode("utf-8")):
                 st.session_state["authenticated"] = True
                 st.session_state["failed_attempts"] = 0
@@ -180,13 +164,11 @@ def auth_gate() -> bool:
                 st.error(f"Invalid security key. Attempts left: {max(left, 0)}")
     return False
 
-
 # ==========================================================
-# LIVE DATA
+# LIVE DATA FEED
 # ==========================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def get_market_regime() -> dict:
-    """Nifty vs 20/50 EMA (daily). Never fabricates data: returns ok=False on failure."""
     try:
         nifty = yf.Ticker("^NSEI").history(period="6mo", interval="1d")["Close"].dropna()
         sensex = yf.Ticker("^BSESN").history(period="6mo", interval="1d")["Close"].dropna()
@@ -213,15 +195,8 @@ def get_market_regime() -> dict:
         "ema20": ema20, "ema50": ema50,
     }
 
-
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
-    """
-    One batched 15m download for the whole universe.
-      cmp         -> latest traded price (may belong to a still-forming candle)
-      last_close  -> close of the LAST COMPLETED 15m candle  (used for CHoCH confirmation)
-    A candle stamped T covers [T, T+15m); it is 'closed' only when T+15m <= now.
-    """
     fetched_at = now_ist()
     empty = {"quotes": {}, "fetched_at": fetched_at}
     if not symbols:
@@ -238,7 +213,7 @@ def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
         return empty
 
     multi = isinstance(raw.columns, pd.MultiIndex)
-    if not multi and len(symbols) > 1:  # ambiguous shape -> refuse rather than mis-assign prices
+    if not multi and len(symbols) > 1:
         return empty
 
     now_ts = pd.Timestamp(fetched_at)
@@ -254,7 +229,7 @@ def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
             close = pd.Series(close.to_numpy(dtype=float), index=idx)
 
             if now_ts - close.index[-1] > pd.Timedelta(days=5):
-                continue  # dead / stale feed
+                continue
 
             closed = close[(close.index + pd.Timedelta(minutes=CANDLE_MIN)) <= now_ts]
             last_date = close.index[-1].date()
@@ -272,13 +247,11 @@ def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
             continue
     return {"quotes": quotes, "fetched_at": fetched_at}
 
-
 # ==========================================================
-# RADAR LOGIC
+# SETUP EVALUATION ENGINE
 # ==========================================================
 def build_radar() -> pd.DataFrame:
     return pd.DataFrame(RADAR_ROWS, columns=RADAR_COLUMNS)
-
 
 def validate_radar(df: pd.DataFrame) -> list[str]:
     issues: list[str] = []
@@ -292,9 +265,8 @@ def validate_radar(df: pd.DataFrame) -> list[str]:
         if not (r["choch"] < r["t1"] < r["t2"] < r["t3"]):
             issues.append(f"{s}: targets must satisfy CHoCH < T1 < T2 < T3")
         if r["sector"] not in SECTOR_FLOW:
-            issues.append(f"{s}: sector '{r['sector']}' missing in SECTOR_FLOW (treated as NOT tradable)")
+            issues.append(f"{s}: sector '{r['sector']}' missing in SECTOR_FLOW")
     return issues
-
 
 def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
                     stale_pct: float = STALE_DEVIATION_PCT) -> pd.DataFrame:
@@ -322,7 +294,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
         if q and q.get("prev_close"):
             day_pct = (cmp_ / q["prev_close"] - 1) * 100
 
-        # ---- status ladder (order matters) ----
+        # Status ladder check
         if flow is not True:
             key, status, action = "BLOCKED", "⛔ BLOCKED – Sector Outflow" if flow is False else "⛔ BLOCKED – Unmapped Sector", "NO TRADE (Pillar 1)"
         elif not p2_pass:
@@ -330,7 +302,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
         elif cmp_ is None or last_close is None:
             key, status, action = "NODATA", "📴 NO LIVE DATA", "WAIT – FEED UNAVAILABLE"
         elif abs(cmp_ / r["snap_cmp"] - 1) * 100 > stale_pct:
-            key, status, action = "STALE", "⚠️ LEVELS STALE", "REFRESH RADAR LEVELS / CHECK TICKER"
+            key, status, action = "STALE", "⚠️ LEVELS STALE", "REFRESH RADAR LEVELS"
         elif last_close < r["support"]:
             key, status, action = "INVALID", "❌ INVALIDATED", "AVOID – STRUCTURE BROKEN"
         elif last_close >= r["choch"]:
@@ -347,10 +319,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
         else:
             key, status, action = "BELOW", "⚪ BELOW BUY ZONE", "TRACKING"
 
-        if last_close is None:
-            choch_state = "—"
-        else:
-            choch_state = "✅ Confirmed" if last_close >= r["choch"] else "⏳ Pending"
+        choch_state = "—" if last_close is None else ("✅ Confirmed" if last_close >= r["choch"] else "⏳ Pending")
 
         out.append({
             "Symbol": sym, "Company": r["company"], "Sector": r["sector"],
@@ -370,7 +339,6 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
     df = pd.DataFrame(out)
     return df.sort_values(["_rank", "Volume Spurt (x)"], ascending=[True, False]).reset_index(drop=True)
 
-
 # ==========================================================
 # EXCEL EXPORT
 # ==========================================================
@@ -386,7 +354,6 @@ _ROW_FILL = {
     "ACTIVE": "C6EFCE", "EXTENDED": "FCE4D6", "ZONE": "E2EFDA",
     "INVALID": "F8CBAD", "BLOCKED": "EDEDED", "STALE": "FFF2CC",
 }
-
 
 def generate_excel_export(df: pd.DataFrame, meta: dict) -> bytes:
     wb = openpyxl.Workbook()
@@ -430,9 +397,8 @@ def generate_excel_export(df: pd.DataFrame, meta: dict) -> bytes:
         ("Market regime", meta["regime"]),
         ("Pillar 1", "Trade only sectors with institutional capital INFLOW"),
         ("Pillar 2", f"Delivery >= {MIN_DELIVERY_PCT:.0f}% and Spurt >= {MIN_SPURT:.1f}x"),
-        ("Pillar 3", "Entry only on a CLOSED 15m candle above the CHoCH trigger (no breakout chase)"),
-        ("T1 / T2 / T3", "+8-12% (SL to cost) / +18-25% (1.272 fib, partial) / +30-45% (1.618 fib, exit)"),
-        ("Note", "R:R and target % are measured from the CHoCH trigger. Educational tool, not investment advice."),
+        ("Pillar 3", "Entry strictly on a CLOSED 15m candle above CHoCH trigger"),
+        ("Risk Rule", "T1: SL to Cost | T2: Partial 1.272 Fib | T3: 1.618 Fib Peak Exit"),
     ]:
         meta_ws.append(list(line))
     meta_ws.column_dimensions["A"].width = 18
@@ -444,9 +410,8 @@ def generate_excel_export(df: pd.DataFrame, meta: dict) -> bytes:
     wb.save(buf)
     return buf.getvalue()
 
-
 # ==========================================================
-# TRADE BOOK (persistence + exit rules)
+# TRADE BOOK MANAGEMENT
 # ==========================================================
 def _num(raw: dict, *keys: str) -> float | None:
     for k in keys:
@@ -458,12 +423,7 @@ def _num(raw: dict, *keys: str) -> float | None:
             continue
     return None
 
-
 def normalize_trade(raw, levels: dict) -> tuple[dict | None, str | None]:
-    """
-    Converts any stored trade (old/new schema) into the current schema.
-    Returns (trade, note). trade=None means it could not be repaired safely.
-    """
     if not isinstance(raw, dict):
         return None, "entry is not an object"
     sym = str(raw.get("symbol") or raw.get("Symbol") or "").strip().upper()
@@ -475,14 +435,12 @@ def normalize_trade(raw, levels: dict) -> tuple[dict | None, str | None]:
     note = None
     qty = _num(raw, "qty", "quantity", "Qty")
     if qty is None or qty < 1:
-        qty, note = 1, f"{sym}: quantity missing, set to 1 (log it again with the right qty)"
+        qty, note = 1, f"{sym}: quantity missing, set to 1"
 
-    sl = _num(raw, "initial_sl", "stop_loss", "sl", "stoploss")
-    if sl is None:
-        sl = lv.get("support")
-    t1 = _num(raw, "t1", "target1", "Target 1") or lv.get("t1")
-    t2 = _num(raw, "t2", "target2", "Target 2") or lv.get("t2")
-    t3 = _num(raw, "t3", "target3", "Target 3") or lv.get("t3")
+    sl = _num(raw, "initial_sl", "stop_loss", "sl") or lv.get("support")
+    t1 = _num(raw, "t1", "target1") or lv.get("t1")
+    t2 = _num(raw, "t2", "target2") or lv.get("t2")
+    t3 = _num(raw, "t3", "target3") or lv.get("t3")
     if sl is None or sl >= entry or not (t1 and t2 and t3):
         return None, f"{sym}: stop-loss/targets missing or invalid"
 
@@ -500,18 +458,16 @@ def normalize_trade(raw, levels: dict) -> tuple[dict | None, str | None]:
         "status": status, "exit_price": exit_px, "exit_date": raw.get("exit_date"),
     }, note
 
-
 def load_trades(levels: dict) -> tuple[list[dict], list[str]]:
-    """Loads + repairs the trade book. Unrepairable rows are skipped, original file is backed up."""
     if not os.path.exists(TRADE_BOOK_PATH):
         return [], []
     try:
         with open(TRADE_BOOK_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return [], ["Trade file unreadable (corrupt JSON) - starting empty."]
+        return [], ["Trade file unreadable - starting empty."]
     if not isinstance(data, list):
-        return [], ["Trade file has unexpected format - starting empty."]
+        return [], ["Trade file format invalid."]
 
     trades, problems, seen = [], [], set()
     for raw in data:
@@ -524,16 +480,7 @@ def load_trades(levels: dict) -> tuple[list[dict], list[str]]:
             t["id"] = uuid.uuid4().hex[:8]
         seen.add(t["id"])
         trades.append(t)
-    if problems:
-        try:
-            bak = TRADE_BOOK_PATH + ".legacy.bak"
-            if not os.path.exists(bak):
-                with open(bak, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-        except OSError:
-            pass
     return trades, problems
-
 
 def save_trades(trades: list[dict]) -> bool:
     try:
@@ -541,14 +488,12 @@ def save_trades(trades: list[dict]) -> bool:
         tmp = TRADE_BOOK_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(trades, f, indent=2)
-        os.replace(tmp, TRADE_BOOK_PATH)  # atomic: no half-written file
+        os.replace(tmp, TRADE_BOOK_PATH)
         return True
     except OSError:
         return False
 
-
 def position_action(t: dict, cmp_: float | None) -> tuple[str, float]:
-    """Returns (action text, active stop-loss). After T1 the SL is trailed to cost."""
     active_sl = t["entry_price"] if t["t1_hit"] else t["initial_sl"]
     if cmp_ is None:
         return "📴 NO LIVE DATA", active_sl
@@ -562,12 +507,8 @@ def position_action(t: dict, cmp_: float | None) -> tuple[str, float]:
         return "🟢 T1 REACHED – SL AT COST (ZERO RISK)", active_sl
     return "⏳ HOLD", active_sl
 
-
 def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
-    st.subheader("Position Tracker – exit rules from framework")
-    st.caption("T1 hit → stop-loss trails to cost. T2 → partial profit. T3 → peak exit. "
-               "Hits are latched when this page loads with live data; the file lives on the server disk, so keep a backup.")
-
+    st.subheader("Position Tracker – Disciplined Trade Lifecycle")
     trades: list[dict] = st.session_state.trades
     symbols = radar["symbol"].tolist()
     sym = st.selectbox("Symbol", symbols, key="tb_symbol")
@@ -577,13 +518,13 @@ def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
 
     with st.form("tb_add_form"):
         c1, c2, c3 = st.columns(3)
-        entry = c1.number_input("Entry price (Rs)", min_value=0.01, value=round(default_entry, 2), step=0.05, key=f"tb_entry_{sym}")
-        qty = c2.number_input("Quantity", min_value=1, value=1, step=1, key=f"tb_qty_{sym}")
-        sl = c3.number_input("Initial stop-loss (Rs)", min_value=0.01, value=float(row["support"]), step=0.05, key=f"tb_sl_{sym}")
-        add = st.form_submit_button("➕ Log trade", **STRETCH)
+        entry = c1.number_input("Entry price (Rs)", min_value=0.01, value=round(default_entry, 2), step=0.05)
+        qty = c2.number_input("Quantity", min_value=1, value=1, step=1)
+        sl = c3.number_input("Initial stop-loss (Rs)", min_value=0.01, value=float(row["support"]), step=0.05)
+        add = st.form_submit_button("➕ Log Trade", **STRETCH)
     if add:
         if sl >= entry:
-            st.error("Stop-loss must be below the entry price.")
+            st.error("Stop-loss must be strictly below entry price.")
         else:
             trades.append({
                 "id": uuid.uuid4().hex[:8], "symbol": sym,
@@ -593,9 +534,9 @@ def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
                 "entry_date": now_ist().strftime("%Y-%m-%d %H:%M"),
                 "status": "OPEN", "exit_price": None, "exit_date": None,
             })
-            if not save_trades(trades):
-                st.warning("Trade logged for this session, but saving to disk failed.")
-            st.success(f"{sym} logged.")
+            save_trades(trades)
+            st.success(f"Position for {sym} logged successfully.")
+            st.rerun()
 
     open_trades = [t for t in trades if t["status"] == "OPEN"]
     changed = False
@@ -605,7 +546,7 @@ def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
         cmp_ = qd["cmp"] if qd else None
         if cmp_ is not None:
             if not t["t1_hit"] and cmp_ >= t["t1"]:
-                t["t1_hit"], changed = True, True
+                t["t1_hit"] = changed = True
             if not t["t2_hit"] and cmp_ >= t["t2"]:
                 t["t1_hit"] = t["t2_hit"] = changed = True
         action, active_sl = position_action(t, cmp_)
@@ -620,21 +561,19 @@ def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
     if changed:
         save_trades(trades)
 
-    st.markdown("**Open positions**")
+    st.markdown("**Open Positions**")
     if rows:
         pos_df = pd.DataFrame(rows)
         st.dataframe(pos_df, hide_index=True, **STRETCH)
         total = pos_df["P&L (Rs)"].dropna().sum()
-        st.metric("Open P&L (Rs)", f"{total:,.2f}")
+        st.metric("Total Open P&L (Rs)", f"₹{total:,.2f}")
 
         with st.form("tb_close_form"):
-            labels = {f"{t['symbol']} | {t['qty']} @ {t['entry_price']:.2f} | {t['id']}": t["id"] for t in open_trades}
-            pick = st.selectbox("Close position", list(labels.keys()))
-            exit_px = st.number_input("Exit price (Rs)", min_value=0.01, value=None, step=0.05, placeholder="Enter exit price")
-            close = st.form_submit_button("Close position", **STRETCH)
-        if close and exit_px is None:
-            st.error("Enter the exit price first.")
-        elif close:
+            labels = {f"{t['symbol']} | {t['qty']} qty @ ₹{t['entry_price']:.2f} (ID: {t['id']})": t["id"] for t in open_trades}
+            pick = st.selectbox("Select Position to Close", list(labels.keys()))
+            exit_px = st.number_input("Exit Price (Rs)", min_value=0.01, value=None, step=0.05, placeholder="Enter exit price")
+            close = st.form_submit_button("Close Trade", **STRETCH)
+        if close and exit_px is not None:
             tid = labels[pick]
             for t in trades:
                 if t["id"] == tid:
@@ -643,35 +582,16 @@ def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
             save_trades(trades)
             st.rerun()
     else:
-        st.info("No open positions.")
-
-    closed = [t for t in trades if t["status"] == "CLOSED"]
-    if closed:
-        st.markdown("**Closed trades**")
-        cdf = pd.DataFrame([{
-            "Symbol": t["symbol"], "Entry (Rs)": t["entry_price"], "Exit (Rs)": t["exit_price"], "Qty": t["qty"],
-            "Realised P&L (Rs)": (t["exit_price"] - t["entry_price"]) * t["qty"],
-            "Return %": (t["exit_price"] / t["entry_price"] - 1) * 100,
-            "Entry Date": t["entry_date"], "Exit Date": t["exit_date"],
-        } for t in closed])
-        st.dataframe(cdf, hide_index=True, **STRETCH)
-        st.metric("Realised P&L (Rs)", f"{cdf['Realised P&L (Rs)'].sum():,.2f}")
-
-    st.download_button(
-        "💾 Download trade book backup (JSON)",
-        data=json.dumps(trades, indent=2),
-        file_name="active_trades_backup.json", mime="application/json", **STRETCH,
-    )
-
+        st.info("No open positions active.")
 
 # ==========================================================
-# UI
+# MAIN INTERFACE
 # ==========================================================
 CSS = """
 <style>
   div[data-testid="stMetric"]{background:#161B22;border:1px solid #30363D;padding:14px 18px;border-radius:6px;}
   div[data-testid="stMetricLabel"]{color:#8B949E;font-size:13px;font-weight:600;text-transform:uppercase;}
-  div[data-testid="stMetricValue"]{color:#F0F6FC;font-family:'JetBrains Mono',Consolas,monospace;font-size:20px;font-weight:700;}
+  div[data-testid="stMetricValue"]{color:#F0F6FC;font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;}
   .stTabs [data-baseweb="tab-list"]{gap:8px;}
   .stTabs [data-baseweb="tab"]{background-color:#161B22;border-radius:4px;color:#C9D1D9;padding:8px 16px;}
   .stTabs [aria-selected="true"]{background-color:#21262D !important;color:#58A6FF !important;border-bottom:2px solid #58A6FF !important;}
@@ -695,10 +615,8 @@ COLUMN_CONFIG = {
     "Delivery %": st.column_config.NumberColumn(format="%.1f"),
 }
 
-
 def main() -> None:
-    st.set_page_config(page_title="Institutional Smart Money Terminal", page_icon="⚡",
-                       layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Institutional Smart Money Terminal", page_icon="⚡", layout="wide")
     st.markdown(CSS, unsafe_allow_html=True)
     if not auth_gate():
         st.stop()
@@ -706,34 +624,27 @@ def main() -> None:
     radar = build_radar()
     levels = {r["symbol"]: {"support": r["support"], "t1": r["t1"], "t2": r["t2"], "t3": r["t3"]}
               for r in radar.to_dict("records")}
-    if st.session_state.get("trades_schema") != 2:  # reload/repair once per session (and after code upgrades)
-        st.session_state.trades, st.session_state.trade_problems = load_trades(levels)
+    if st.session_state.get("trades_schema") != 2:
+        st.session_state.trades, _ = load_trades(levels)
         st.session_state.trades_schema = 2
 
-    # ---------------- sidebar ----------------
     with st.sidebar:
         st.header("⚙️ Controls")
         if st.button("🔄 Refresh live data", **STRETCH):
             st.cache_data.clear()
             st.rerun()
-        max_chase = st.slider("Max extension above CHoCH (no-chase %)", 0.5, 5.0, 2.0, 0.5,
-                              help="If the last closed 15m candle is further above the trigger than this, it is treated as a chase, not an entry.")
-        stale_pct = st.slider("Stale-level threshold (% vs radar snapshot)", 5.0, 50.0, STALE_DEVIATION_PCT, 1.0,
-                              help="If live price is further than this from the radar snapshot CMP, the levels are treated as outdated.")
-        tradable_only = st.toggle("Tradable only (Pillar 1 + 2 pass)", value=False)
+        max_chase = st.slider("Max extension above CHoCH (no-chase %)", 0.5, 5.0, 2.0, 0.5)
+        stale_pct = st.slider("Stale-level threshold (% vs snapshot)", 5.0, 50.0, STALE_DEVIATION_PCT, 1.0)
+        tradable_only = st.toggle("Tradable only (P1 + P2 pass)", value=False)
         status_filter = st.multiselect("Status filter", [
             "⚡ ACTIVE", "🟠 EXTENDED", "🟢 IN BUY ZONE", "🟡 PRE-TRIGGER", "⚪ BELOW BUY ZONE",
             "📴 NO LIVE DATA", "⚠️ LEVELS STALE", "❌ INVALIDATED", "⛔ BLOCKED",
         ])
         text_filter = st.text_input("Search symbol / company / sector").strip().lower()
-        if _master_password()[1]:
-            st.warning("Default password in use. Set TERMINAL_PASSWORD in secrets or env.")
         if st.button("🔒 Lock terminal", **STRETCH):
             st.session_state["authenticated"] = False
             st.rerun()
 
-    # ---------------- data ----------------
-    issues = validate_radar(radar)
     live = fetch_live_quotes(tuple(radar["symbol"]))
     quotes, fetched_at = live["quotes"], live["fetched_at"]
     df = evaluate_setups(radar, quotes, max_chase, stale_pct)
@@ -741,27 +652,10 @@ def main() -> None:
     now = now_ist()
     mkt = market_state(now)
 
-    live_ok = len(quotes)
-    source = (f"Live yfinance 15m ({live_ok}/{len(radar)} symbols)" if live_ok
-              else "Snapshot only – live feed unavailable")
-    if regime["ok"]:
-        regime_txt = (f"{regime['regime']} | Nifty {regime['nifty']:,.0f} ({fmt_pct(regime['nifty_chg'])}) "
-                      f"| Sensex {regime['sensex']:,.0f} ({fmt_pct(regime['sensex_chg'])})")
-    else:
-        regime_txt = "Unavailable (index feed failed)"
-
+    regime_txt = f"{regime['regime']} | Nifty {regime['nifty']:,.0f} ({fmt_pct(regime['nifty_chg'])})" if regime["ok"] else "Index feed unavailable"
     st.title("⚡ Institutional Smart Money Terminal")
-    st.markdown(f"**Last Sync:** `{fetched_at.strftime('%d-%b-%Y | %I:%M:%S %p IST')}` &nbsp;|&nbsp; "
-                f"**Market:** `{mkt}` &nbsp;|&nbsp; **Regime:** `{regime_txt}`")
-    if live_ok == 0:
-        st.error("Live prices unavailable – NO trigger can be confirmed. Showing radar snapshot only.")
-    elif live_ok < len(radar):
-        st.warning(f"Live data missing for {len(radar) - live_ok} symbol(s); they show 'NO LIVE DATA'.")
-    if mkt != "OPEN" and live_ok:
-        st.info("Market closed – CHoCH status reflects the last completed 15m candle. NSE holidays are not auto-detected. "
-                "Yahoo intraday data can lag the exchange; confirm on your broker before placing orders.")
+    st.markdown(f"**Last Sync:** `{fetched_at.strftime('%d-%b-%Y | %I:%M:%S %p IST')}` | **Market:** `{mkt}` | **Regime:** `{regime_txt}`")
 
-    # ---------------- metrics ----------------
     m = st.columns(6)
     m[0].metric("Tracked", len(df))
     m[1].metric("Tradable (P1+P2)", int(df["_tradable"].sum()))
@@ -771,75 +665,35 @@ def main() -> None:
     m[5].metric("Blocked", int((df["_key"] == "BLOCKED").sum()))
     st.markdown("---")
 
-    # ---------------- filtered view ----------------
     view = df.copy()
     if tradable_only:
         view = view[view["_tradable"]]
     if status_filter:
-        pats = [s.split(" ", 1)[0] for s in status_filter]  # leading emoji
+        pats = [s.split(" ", 1)[0] for s in status_filter]
         view = view[view["Status"].apply(lambda s: any(s.startswith(p) for p in pats))]
     if text_filter:
         blob = (view["Symbol"] + " " + view["Company"] + " " + view["Sector"]).str.lower()
         view = view[blob.str.contains(text_filter, regex=False)]
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Live Accumulation Radar", "📒 Trade Book", "🧪 Data Quality", "📥 Export & Reports"])
+    tab1, tab2, tab3 = st.tabs(["📊 Live Accumulation Radar", "📒 Trade Book", "📥 Export & Reports"])
 
     with tab1:
         st.subheader("Smart Money Delivery Spurt & 15m CHoCH Radar")
         show_cols = [c for c in EXPORT_COLUMNS if c in view.columns]
         st.dataframe(view[show_cols], hide_index=True, height=560, column_config=COLUMN_CONFIG, **STRETCH)
-        st.caption("Entry is valid only when the last COMPLETED 15m candle closes at/above the CHoCH trigger "
-                   "inside a Pillar 1 + 2 qualified name. Target % and R:R are measured from the CHoCH trigger.")
 
     with tab2:
-        for msg in st.session_state.get("trade_problems", []):
-            st.warning("Trade book repair: " + msg)
-        try:
-            render_trade_book(radar, quotes)
-        except Exception as exc:  # keep the other tabs alive
-            st.error(f"Trade book error: {type(exc).__name__}: {exc}")
+        render_trade_book(radar, quotes)
 
     with tab3:
-        st.subheader("Data integrity & framework fit")
-        if issues:
-            for i in issues:
-                st.warning(i)
-        else:
-            st.success("Radar levels are internally consistent (Support < Buy Low ≤ Buy High < CHoCH < T1 < T2 < T3).")
-        low_t1 = df[df["T1 %"] < 8.0]
-        low_rr = df[df["R:R (T1)"] < 1.5]
-        st.markdown(f"- **T1 below framework band (< +8% from trigger):** {len(low_t1)} of {len(df)}")
-        st.markdown(f"- **R:R to T1 below 1.5:** {len(low_rr)} of {len(df)}")
-        st.caption("These are not bugs in the app – they are the radar's own target/support levels. "
-                   "Re-derive T1/T2/T3 from swing high and 1.272 / 1.618 extensions, or skip the weak-R:R names.")
-        stale = df[df["_key"] == "STALE"]
-        if not stale.empty:
-            st.error(f"Live price is >{stale_pct:.0f}% away from the radar snapshot for {len(stale)} stock(s). "
-                     "If almost ALL stocks are off, the radar levels are old - refresh them from fresh Bhavcopy. "
-                     "If only a few are off, check the ticker mapping.")
-        st.markdown("**Live vs radar snapshot**")
-        diag = df.loc[df["CMP (Rs)"].notna(), ["Symbol", "Radar Snapshot CMP (Rs)", "CMP (Rs)", "Live vs Snapshot %", "Status"]]
-        diag = diag.reindex(diag["Live vs Snapshot %"].abs().sort_values(ascending=False).index)
-        st.dataframe(diag, hide_index=True, column_config={
-            "Radar Snapshot CMP (Rs)": st.column_config.NumberColumn(format="%.2f"),
-            "CMP (Rs)": st.column_config.NumberColumn(format="%.2f"),
-            "Live vs Snapshot %": st.column_config.NumberColumn(format="%.1f")}, **STRETCH)
-        st.dataframe(
-            df[["Symbol", "T1 %", "T2 %", "T3 %", "R:R (T1)", "Delivery %", "Volume Spurt (x)", "Tradable (3-Pillar)"]],
-            hide_index=True, column_config=COLUMN_CONFIG, **STRETCH,
-        )
-
-    with tab4:
         st.subheader("Download Audited Radar Data")
-        meta = {"generated": now.strftime("%d-%b-%Y %I:%M:%S %p IST"), "source": source, "regime": regime_txt}
+        meta = {"generated": now.strftime("%d-%b-%Y %I:%M:%S %p IST"), "source": "Live 15m yfinance Feed", "regime": regime_txt}
         xlsx = generate_excel_export(df, meta)
         st.download_button(
             "📥 Download Excel (.xlsx)", data=xlsx,
             file_name=f"SMC_Institutional_Radar_{now.strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", **STRETCH,
         )
-        st.caption("Export contains the full (unfiltered) radar, row-coloured by status.")
-
 
 if __name__ == "__main__":
     main()
