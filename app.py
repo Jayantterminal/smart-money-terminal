@@ -60,7 +60,7 @@ st.markdown("""
 # ==========================================
 # 0. STRICT PASSWORD AUTHENTICATION LOCK
 # ==========================================
-MASTER_PASSWORD = "smartmoney"  # Yahan apna password set karein
+MASTER_PASSWORD = "2000"  # Yahan apna password set karein
 
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
