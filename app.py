@@ -69,6 +69,7 @@ SETUPS = ["In range (base)", "Breakout", "Trending / wide", "Breakdown"]
 BUYS = ["Continuing", "Just started", "Fading", "Not buying"]
 SIGNALS = ["Strong Accumulation", "Accumulation", "Neutral", "Distribution", "Low volume (ignore)"]
 FRESH = list(E.FRESH_SET)
+FRESH_SEL = ["All fresh"] + FRESH
 ESTAT = {"In zone": "🟢 In zone", "Above zone (wait)": "🟡 Above zone", "Below zone": "🔴 Below zone"}
 FICON = {"Spike today": "🔥 Spike today", "Spike (last 3D)": "⚡ Spike (last 3D)",
          "Building (5D)": "🔵 Building (5D)", "None": "-"}
@@ -103,6 +104,22 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 if info["errors"]:
     st.warning(f"{info['errors']} din ka NSE data download nahi ho paya - Refresh karke dekho.")
+
+# ---- Data sanity checks ----
+_warn = []
+if info.get("days", 0) < 40:
+    _warn.append(f"Sirf {info['days']} sessions mile — 3M comparison weak ho sakta hai.")
+try:
+    if scr.Deliv_Per_1M.gt(100).any():
+        _warn.append(f"{int(scr.Deliv_Per_1M.gt(100).sum())} stocks me delivery % > 100 — NSE source data suspicious.")
+    if (scr.Price <= 0).any():
+        _warn.append("Kuch stocks ka price 0 hai — bhavcopy row corrupt.")
+    if scr.Deliv_Qty_X.gt(20).any():
+        _warn.append(f"{int(scr.Deliv_Qty_X.gt(20).sum())} stocks me Deliv qty 1M÷3M > 20x — split/bonus adjust issue ho sakta hai.")
+except Exception:
+    pass
+if _warn:
+    st.warning("**Data warnings:**\n- " + "\n- ".join(_warn))
 
 watch_all = set(E.SECTOR_OF) | set(extras)
 if universe == "My watchlist":
@@ -305,9 +322,16 @@ with tab1:
     g2 = st.columns(3)
     sec_sel = g2[0].multiselect("Sector / Industry", sorted(pool.Sector.unique()), placeholder="All")
     min_wk = g2[1].slider("Min buying weeks (last 4 me se)", 0, 4, 0)
-    fresh_sel = g2[2].multiselect("Fresh activity", FRESH, placeholder="All",
-                                  help="Kisi din achanak delivery qty 3M avg se 2x+ hui to yahan turant dikhega. "
-                                       "Ise chuno to Signal aur Scan preset ignore ho jaate hain.")
+    fresh_sel = g2[2].multiselect(
+        "Fresh activity", FRESH_SEL, placeholder="All",
+        help="Kisi din achanak delivery qty 3M avg se 2x+ hui to yahan turant dikhega. "
+             "'All fresh' = teeno types (Spike today + Spike 3D + Building 5D) ek saath. "
+             "Ise chuno to Signal aur Scan preset ignore ho jaate hain.")
+
+    fresh_picks = []
+    if fresh_sel:
+        fresh_picks = FRESH if "All fresh" in fresh_sel else [x for x in fresh_sel if x in FRESH]
+    has_fresh = bool(fresh_picks)
 
     funnel = [("Universe", len(pool))]
     quick = st.session_state.quick
@@ -320,8 +344,8 @@ with tab1:
         funnel = []
     else:
         d = pool
-        if fresh_sel:
-            d = d[d.Fresh.isin(fresh_sel)]
+        if has_fresh:
+            d = d[d.Fresh.isin(fresh_picks)]
             funnel.append(("Fresh activity", len(d)))
         elif sig:
             d = d[d.Signal.isin(sig)]
@@ -335,7 +359,7 @@ with tab1:
         elif hide_ext:
             d = d[d.Stage != STAGES[3]]
             funnel.append(("Extended hidden", len(d)))
-        if not fresh_sel:
+        if not has_fresh:
             d = d[(d.Deliv_Qty_X >= min_x) & (d.Deliv_Per_Chg >= min_pp)]
             funnel.append(("Scan preset", len(d)))
         if setup_sel: d = d[d.Setup.isin(setup_sel)]
@@ -343,7 +367,7 @@ with tab1:
         if sec_sel: d = d[d.Sector.isin(sec_sel)]
         d = d[d.Buy_Weeks >= min_wk]
         funnel.append(("Setup/Buying/Sector/Weeks", len(d)))
-        if fresh_sel:
+        if has_fresh:
             d = d.sort_values("Last5_X", ascending=False)
     st.caption(f"{len(d)} stocks | prices as of {asof:%d %b %Y}  |  👆 Row pe click karo → stock detail khulega")
     if funnel:
@@ -376,53 +400,138 @@ with tab2:
         st.warning("Sector data nahi mila (NSE sector file load nahi hui ya universe chhota hai). "
                    "Universe 'All liquid NSE stocks' rakho aur Refresh karo.")
     else:
-        st.caption("Delivery flow se sector rotation: kis sector me paisa aa raha hai (Flow 1M) aur pichle 2 mahine "
-                   "se behtar ho raha hai ya nahi (Flow change). Improving → Leading me aane wale sectors pe nazar rakho.")
-        fig = go.Figure()
-        for qn, col in QCOL.items():
-            s = sec[sec.Quadrant == qn]
-            if s.empty:
-                continue
-            fig.add_trace(go.Scatter(
-                x=s.Flow_1M, y=s.Flow_Chg, mode="markers+text", text=s.Sector, textposition="top center",
-                name=qn, marker=dict(size=np.clip(s.Stocks * 1.2 + 10, 12, 40), color=col, opacity=0.75,
-                                     line=dict(color="white", width=1)),
-                customdata=np.stack([s.Acc_Pct, s.Stocks, s.Fresh], axis=1),
-                hovertemplate="%{text}<br>Flow 1M %{x:+.1f}%<br>Change vs prev 2M %{y:+.1f}<br>"
-                              "Accumulating %{customdata[0]}% of %{customdata[1]} stocks<br>"
-                              "Fresh %{customdata[2]}<extra></extra>"))
-        fig.add_vline(x=0, line_color="#64748b")
-        fig.add_hline(y=0, line_color="#64748b")
-        fig.update_layout(height=520, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10),
-                          xaxis_title="Net buy flow 1M (avg %, up-day − down-day delivery)",
-                          yaxis_title="Change vs previous 2M (pp)", legend=dict(orientation="h"))
-        st.plotly_chart(fig, width="stretch", key="sec_chart")
+        # ---------- Top KPI strip ----------
+        q_counts = sec.groupby("Quadrant").size().to_dict()
+        q_flow = sec.groupby("Quadrant").Flow_1M.mean().to_dict()
+        kc = st.columns(4)
+        for i, q in enumerate(["Leading", "Improving", "Weakening", "Lagging"]):
+            n = int(q_counts.get(q, 0))
+            fval = q_flow.get(q, 0.0)
+            cls = {"Leading": "g", "Improving": "g", "Weakening": "y", "Lagging": "r"}[q]
+            kpi(kc[i], f"{QICON[q]}", f"{n} sectors",
+                f"Avg flow {fval:+.1f}%" if n else "No sector", cls)
 
+        st.markdown("##### 🧭 Rotation map — Flow 1M (X) vs Flow change vs prev 2M (Y)")
+        st.caption("Right side = paisa abhi aa raha hai. Top side = pichle 2 mahine se sudhar. "
+                   "**Top-right (Leading)** = already strong. **Top-left (Improving)** = early entry zone. "
+                   "Bubble size = stocks in sector.")
+
+        # ---------- Quadrant chart ----------
+        xs = sec.Flow_1M.replace([np.inf, -np.inf], np.nan).dropna()
+        ys = sec.Flow_Chg.replace([np.inf, -np.inf], np.nan).dropna()
+        if xs.empty or ys.empty:
+            st.info("Sector flow data insufficient is universe me.")
+        else:
+            pad_x = max(abs(xs.min()), abs(xs.max())) * 1.15 + 5
+            pad_y = max(abs(ys.min()), abs(ys.max())) * 1.15 + 3
+            x0, x1 = -pad_x, pad_x
+            y0, y1 = -pad_y, pad_y
+
+            fig = go.Figure()
+            for xA, xB, yA, yB, col, label in [
+                (0, x1, 0, y1, "#22c55e", "LEADING"),
+                (x0, 0, 0, y1, "#3b82f6", "IMPROVING"),
+                (0, x1, y0, 0, "#f59e0b", "WEAKENING"),
+                (x0, 0, y0, 0, "#ef4444", "LAGGING"),
+            ]:
+                fig.add_shape(type="rect", x0=xA, x1=xB, y0=yA, y1=yB,
+                              fillcolor=col, opacity=0.055, line_width=0, layer="below")
+                fig.add_annotation(x=(xA + xB) / 2, y=yB * 0.92,
+                                   text=label, showarrow=False,
+                                   font=dict(size=11, color=col), opacity=0.6)
+
+            for qn, col in QCOL.items():
+                s = sec[sec.Quadrant == qn]
+                if s.empty:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=s.Flow_1M, y=s.Flow_Chg, mode="markers+text",
+                    text=s.Sector, textposition="top center",
+                    textfont=dict(size=10),
+                    name=QICON[qn],
+                    marker=dict(size=np.clip(s.Stocks * 1.2 + 12, 14, 44),
+                                color=col, opacity=0.85,
+                                line=dict(color="#0f172a", width=1.5)),
+                    customdata=np.stack([s.Acc_Pct, s.Stocks, s.Fresh,
+                                         s.Deliv_Qty_X, s.Ret_1M], axis=1),
+                    hovertemplate=("<b>%{text}</b><br>"
+                                   "Flow 1M: %{x:+.1f}%<br>"
+                                   "Change vs prev 2M: %{y:+.1f} pp<br>"
+                                   "Accumulating: %{customdata[0]}%% of %{customdata[1]}<br>"
+                                   "Fresh: %{customdata[2]}<br>"
+                                   "Deliv qty 1M÷3M: %{customdata[3]:.2f}x<br>"
+                                   "Ret 1M: %{customdata[4]:+.1f}%<extra></extra>"))
+            fig.add_vline(x=0, line_color="#475569", line_width=1)
+            fig.add_hline(y=0, line_color="#475569", line_width=1)
+            fig.update_layout(
+                height=560, template="plotly_dark",
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis=dict(title="Net buy flow 1M (avg %, up-day − down-day delivery)",
+                           range=[x0, x1], zeroline=False, gridcolor="#1e293b"),
+                yaxis=dict(title="Change vs previous 2M (pp)",
+                           range=[y0, y1], zeroline=False, gridcolor="#1e293b"),
+                legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+                hoverlabel=dict(bgcolor="#0f172a", bordercolor="#334155"))
+            st.plotly_chart(fig, width="stretch", key="sec_chart")
+
+        # ---------- Top / Bottom movers ----------
+        c1, c2 = st.columns(2)
+        top = sec.sort_values("Flow_Chg", ascending=False).head(5)[
+            ["Sector", "Quadrant", "Flow_1M", "Flow_Chg", "Acc_Pct", "Stocks"]]
+        bot = sec.sort_values("Flow_Chg").head(5)[
+            ["Sector", "Quadrant", "Flow_1M", "Flow_Chg", "Acc_Pct", "Stocks"]]
+        with c1:
+            st.markdown("###### 🚀 Fastest-improving (rotation coming IN)")
+            st.dataframe(top, hide_index=True, width="stretch",
+                         column_config={
+                             "Flow_1M": st.column_config.NumberColumn(format="%+.1f%%"),
+                             "Flow_Chg": st.column_config.NumberColumn(format="%+.1f pp"),
+                             "Acc_Pct": st.column_config.ProgressColumn(
+                                 min_value=0, max_value=100, format="%d%%"),
+                         })
+        with c2:
+            st.markdown("###### 🧊 Fastest-weakening (rotation going OUT)")
+            st.dataframe(bot, hide_index=True, width="stretch",
+                         column_config={
+                             "Flow_1M": st.column_config.NumberColumn(format="%+.1f%%"),
+                             "Flow_Chg": st.column_config.NumberColumn(format="%+.1f pp"),
+                             "Acc_Pct": st.column_config.ProgressColumn(
+                                 min_value=0, max_value=100, format="%d%%"),
+                         })
+
+        # ---------- Full sector table (clickable) ----------
+        st.markdown("###### 📋 All sectors — click row to drill into stocks")
         sv = sec.copy()
         sv["Quadrant"] = sv.Quadrant.map(QICON)
-        st.markdown("**Sector pe click karo → uske stocks neeche aayenge**")
+        sv = sv.sort_values("Flow_Chg", ascending=False)
         ev = st.dataframe(
-            sv, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="sec_tbl",
+            sv, hide_index=True, width="stretch", height=min(560, 40 + 35 * len(sv)),
+            on_select="rerun", selection_mode="single-row", key="sec_tbl",
             column_config={
-                "Acc_Pct": st.column_config.ProgressColumn("Accumulating %", min_value=0, max_value=100, format="%d%%"),
-                "Stocks": st.column_config.NumberColumn("Stocks", format="%d"),
-                "Accumulating": st.column_config.NumberColumn("Accum. stocks", format="%d"),
-                "Strong": st.column_config.NumberColumn("Strong", format="%d"),
-                "Continuing": st.column_config.NumberColumn("Buying continuing", format="%d"),
-                "Fresh": st.column_config.NumberColumn("⚡ Fresh", format="%d"),
+                "Sector": st.column_config.TextColumn("Sector", pinned=True, width="medium"),
+                "Quadrant": st.column_config.TextColumn("State", width="small"),
+                "Acc_Pct": st.column_config.ProgressColumn(
+                    "Accumulating %", min_value=0, max_value=100, format="%d%%", width="small"),
+                "Stocks": st.column_config.NumberColumn("Stocks", format="%d", width="small"),
+                "Accumulating": st.column_config.NumberColumn("Accum.", format="%d", width="small"),
+                "Strong": st.column_config.NumberColumn("Strong", format="%d", width="small"),
+                "Continuing": st.column_config.NumberColumn("Buying cont.", format="%d", width="small"),
+                "Fresh": st.column_config.NumberColumn("⚡ Fresh", format="%d", width="small"),
                 "Flow_1M": st.column_config.NumberColumn("Flow 1M", format="%+.1f%%"),
                 "Flow_Prev": st.column_config.NumberColumn("Flow prev 2M", format="%+.1f%%"),
-                "Flow_Chg": st.column_config.NumberColumn("Flow change", format="%+.1f pp"),
-                "Deliv_Qty_X": st.column_config.NumberColumn("Deliv qty 1M÷3M", format="%.2fx"),
+                "Flow_Chg": st.column_config.NumberColumn("Flow Δ", format="%+.1f pp"),
+                "Deliv_Qty_X": st.column_config.NumberColumn("Deliv 1M÷3M", format="%.2fx"),
                 "Ret_1W": st.column_config.NumberColumn("Ret 1W", format="%+.1f%%"),
                 "Ret_1M": st.column_config.NumberColumn("Ret 1M", format="%+.1f%%"),
                 "Ret_3M": st.column_config.NumberColumn("Ret 3M", format="%+.1f%%"),
             })
+
         if ev.selection.rows:
-            chosen = sec.iloc[ev.selection.rows[0]].Sector
+            chosen = sv.iloc[ev.selection.rows[0]].Sector
             sd = pool[pool.Sector == chosen].sort_values(["Score", "Deliv_Qty_X"], ascending=False)
-            st.markdown(f"#### {chosen} - {len(sd)} stocks (score ke hisaab se)")
+            st.markdown(f"#### {chosen} — {len(sd)} stocks (score desc)")
             open_sym = stock_table(sd, "sec", height=420) or open_sym
+
         st.caption("Returns = sector ke stocks ka median. Flow = sector stocks ka average net buy flow. "
                    "Quadrant: Leading = flow + aur badh raha | Improving = flow abhi - par sudhar raha (early) | "
                    "Weakening = flow + par ghat raha | Lagging = flow - aur bigad raha.")
