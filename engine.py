@@ -128,6 +128,44 @@ def fetch_history(sessions: int = 80):
 # --------------------------------------------------------------------------- #
 # Corporate action adjustment (splits / bonus) - otherwise delivery qty jumps
 # --------------------------------------------------------------------------- #
+SECTOR_URLS = [
+    "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+    "https://nsearchives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv",
+]
+SECTOR_FILE = os.path.join("data", "sector_map.csv")
+
+
+def fetch_sector_map() -> dict:
+    """Symbol -> NSE Industry (Nifty 500 + Microcap 250 = ~750 stocks). Cached 7 days on disk."""
+    try:
+        if os.path.exists(SECTOR_FILE) and (dt.datetime.now().timestamp() - os.path.getmtime(SECTOR_FILE)) < 7 * 86400:
+            m = pd.read_csv(SECTOR_FILE)
+            return dict(zip(m.Symbol, m.Industry))
+    except Exception:
+        pass
+    frames = []
+    for url in SECTOR_URLS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            if r.status_code == 200:
+                df = pd.read_csv(io.StringIO(r.text))
+                df.columns = [c.strip() for c in df.columns]
+                frames.append(df[["Symbol", "Industry"]])
+        except Exception:
+            continue
+    if frames:
+        m = pd.concat(frames).drop_duplicates("Symbol")
+        m["Symbol"] = m.Symbol.astype(str).str.strip()
+        os.makedirs("data", exist_ok=True)
+        m.to_csv(SECTOR_FILE, index=False)
+        return dict(zip(m.Symbol, m.Industry))
+    try:  # stale cache is better than nothing
+        m = pd.read_csv(SECTOR_FILE)
+        return dict(zip(m.Symbol, m.Industry))
+    except Exception:
+        return {}
+
+
 PRICE_COLS = ["PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE"]
 QTY_COLS = ["TTL_TRD_QNTY", "DELIV_QTY"]
 
@@ -251,7 +289,9 @@ def make_plan(g, setup, hi_c, lo_c, lo_low) -> dict:
 # --------------------------------------------------------------------------- #
 # Screener: last 1 month vs previous 2 months
 # --------------------------------------------------------------------------- #
-def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: float = 0.0) -> pd.DataFrame:
+def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: float = 0.0,
+                     sector_map: dict | None = None) -> pd.DataFrame:
+    sectors = sector_map or {}
     pos = session_pos(hist)
     watch = set(SECTOR_OF) | set(extra)
     rows = []
@@ -280,6 +320,21 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
         qty_x, pp = dq_1m / dq_3m, dp_1m - dp_3m
         today_x = t.DELIV_QTY / dq_3m
         vol_x = rec.TTL_TRD_QNTY.mean() / vol_b
+
+        # --- fresh activity: catches a sudden accumulation day immediately (1M avg is slow) ---
+        last5 = g.iloc[-5:]
+        x5 = (last5.DELIV_QTY / dq_3m).values
+        up5 = (last5.CLOSE_PRICE >= last5.PREV_CLOSE).values
+        last5_x = float(last5.DELIV_QTY.mean() / dq_3m)
+        pattern = "".join("🟢" if (x >= 1.2 and u) else "🔴" if x >= 1.2 else "⚪" for x, u in zip(x5, up5))
+        if today_x >= 2 and up5[-1] and t.DELIV_PER >= dp_3m + 5:
+            fresh = "Spike today"
+        elif any(x5[i] >= 2 and up5[i] for i in (-4, -3, -2)):
+            fresh = "Spike (last 3D)"
+        elif last5_x >= 1.5 and _flow(last5) > 0:
+            fresh = "Building (5D)"
+        else:
+            fresh = "None"
 
         flow_1m = _flow(rec) / max(rec.DELIV_QTY.sum(), 1)
         flow_3m = _flow(base) / max(base.DELIV_QTY.sum(), 1)
@@ -347,12 +402,13 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
         else:
             est = "In zone"
         rows.append({
-            "Symbol": sym, "Sector": SECTOR_OF.get(sym, "-"), "Price": round(close, 2),
+            "Symbol": sym, "Sector": sectors.get(sym) or SECTOR_OF.get(sym) or "Other", "Price": round(close, 2),
             "Chg_Pct": round(float((close / t.PREV_CLOSE - 1) * 100), 2),
             "Deliv_Per": round(float(t.DELIV_PER), 1), "Deliv_Per_1M": round(float(dp_1m), 1),
             "Deliv_Per_3M": round(float(dp_3m), 1), "Deliv_Per_Chg": round(float(pp), 1),
             "Deliv_Qty": int(t.DELIV_QTY), "Deliv_Qty_1M": int(dq_1m), "Deliv_Qty_3M": int(dq_3m),
             "Deliv_Qty_X": round(float(qty_x), 2), "Today_X": round(float(today_x), 2),
+            "Last5_X": round(last5_x, 2), "Fresh": fresh, "Last5": pattern,
             "Vol_X": round(float(vol_x), 2),
             "Net_Flow_1M": round(float(flow_1m) * 100, 0), "Net_Flow_3M": round(float(flow_3m) * 100, 0),
             "Buy_Weeks": buy_weeks, "Buying_Status": bstat,
