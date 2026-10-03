@@ -1,23 +1,10 @@
 """
-Institutional Smart Money Terminal (v4.0 - Professional Edition)
+Institutional Smart Money Terminal (v4.1 - Production Release)
 ------------------------------------------------------------------
 Framework (Three-Pillar Institutional SMC):
   Pillar 1: Full 22 NSE Sector Capital Rotation Matrix (Inflow vs Outflow)
   Pillar 2: Cash Delivery Spurt Filter (Deliv >= 45%, Spurt >= 2.0x)
   Pillar 3: Micro Execution Engine (15m CHoCH / BOS, Accumulation / Distribution Zones)
-
-v4.0 changes
-  * FIX  Bearish zone check never fired (zone_low > zone_high in data) -> zones normalised
-  * FIX  Sector status/signal now derived from share shift (single source of truth)
-  * FIX  Zero-shift sector is NEUTRAL (was wrongly Outflow); sector tab no longer breaks on it
-  * FIX  Trade form defaults now follow the selected symbol (selectbox moved out of form)
-  * FIX  st.secrets crash when secrets.toml is missing; weak default key now warns
-  * NEW  Serial numbering (No.) on every table, tab and section
-  * NEW  Bordered HTML report tables (sticky header, tone badges) + interactive grid toggle
-  * NEW  Bearish "extended - no chase" rule, distance-to-trigger %, radar-aged flag
-  * NEW  Actionable-now strip, sector flow chart, methodology tab
-  * NEW  Trade book: LONG/SHORT side, live P&L, close / delete, SL validation, summary metrics
-  * NEW  Excel export: numbering, borders, number formats, sector sheet
 """
 from __future__ import annotations
 
@@ -548,13 +535,14 @@ def generate_excel_export(df: pd.DataFrame, sec_df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 # ==========================================================
-# TRADE BOOK ENGINE
+# TRADE BOOK ENGINE (CRASH-PROOF)
 # ==========================================================
 def load_trades() -> list:
     if os.path.exists(TRADE_BOOK_PATH):
         try:
             with open(TRADE_BOOK_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                return data if isinstance(data, list) else []
         except Exception:
             pass
     return []
@@ -568,20 +556,29 @@ def trade_row(t: dict, quotes: dict) -> dict:
     side = t.get("side", "LONG")
     mult = 1 if side == "LONG" else -1
     closed = t.get("status") == "CLOSED"
-    px = t.get("exit") if closed else (quotes.get(t["symbol"]) or {}).get("cmp")
-    pnl = (px - t["entry"]) * mult * t["qty"] if px is not None else np.nan
-    pnl_pct = (px / t["entry"] - 1) * 100 * mult if px is not None else np.nan
+    
+    # SAFE EXTRACTION: KeyError prevent karta hai
+    sym = str(t.get("symbol") or t.get("Symbol") or "").strip().upper()
+    q_data = quotes.get(sym, {}) if sym else {}
+    
+    px = t.get("exit") if closed else q_data.get("cmp")
+    entry = float(t.get("entry", 0.0) or t.get("entry_price", 0.0))
+    qty = int(t.get("qty", 1) or 1)
+    sl = float(t.get("sl", 0.0) or t.get("initial_sl", 0.0))
+
+    pnl = (px - entry) * mult * qty if px is not None else np.nan
+    pnl_pct = (px / entry - 1) * 100 * mult if (px is not None and entry > 0) else np.nan
     return {
-        "ID": t["id"], "Symbol": t["symbol"], "Side": side, "Qty": t["qty"],
-        "Entry (Rs)": t["entry"], "SL (Rs)": t["sl"],
+        "ID": t.get("id", ""), "Symbol": sym, "Side": side, "Qty": qty,
+        "Entry (Rs)": entry, "SL (Rs)": sl,
         "CMP / Exit (Rs)": px, "P&L (Rs)": pnl, "P&L %": pnl_pct,
-        "Risk (Rs)": abs(t["entry"] - t["sl"]) * t["qty"],
+        "Risk (Rs)": abs(entry - sl) * qty,
         "Status": t.get("status", "OPEN"), "Opened": t.get("date", ""),
         "_tone": "n" if np.isnan(pnl) else "g" if pnl > 0 else "r" if pnl < 0 else "n",
     }
 
 # ==========================================================
-# UI STYLING
+# UI STYLING (WITH HIGHLIGHTED TABS 1 & 2)
 # ==========================================================
 CSS = """
 <style>
@@ -592,11 +589,33 @@ CSS = """
   div[data-testid="stMetricValue"]{color:#F0F6FC;font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;}
   div[data-testid="stDataFrame"]{border:1px solid #30363D;border-radius:8px;padding:2px;}
   div[data-testid="stForm"]{border:1px solid #30363D;border-radius:8px;background:#0F141B;}
-  .stTabs [data-baseweb="tab-list"]{gap:6px;border-bottom:1px solid #30363D;}
-  .stTabs [data-baseweb="tab"]{background-color:#161B22;border:1px solid #30363D;border-bottom:none;
-      border-radius:6px 6px 0 0;color:#C9D1D9;padding:8px 18px;}
-  .stTabs [aria-selected="true"]{background-color:#21262D !important;color:#58A6FF !important;
-      border-bottom:2px solid #58A6FF !important;}
+  
+  /* Tabs base */
+  .stTabs [data-baseweb="tab-list"]{gap:8px;border-bottom:2px solid #30363D;padding-bottom:4px;}
+  .stTabs [data-baseweb="tab"]{
+      background-color:#161B22;border:1px solid #30363D;border-radius:6px;
+      color:#8B949E;font-weight:600;padding:8px 18px;transition: all 0.2s ease-in-out;
+  }
+  
+  /* Specific Neon Highlights for Tab 1 and Tab 2 */
+  .stTabs [data-baseweb="tab"]:nth-child(1) {
+      border: 1px solid #238636 !important;
+      background: linear-gradient(180deg, #161B22, #0d2116) !important;
+      color: #3FB950 !important;
+  }
+  .stTabs [data-baseweb="tab"]:nth-child(2) {
+      border: 1px solid #1F6FEB !important;
+      background: linear-gradient(180deg, #161B22, #0c1e38) !important;
+      color: #58A6FF !important;
+  }
+  
+  /* Selected tab active glow */
+  .stTabs [aria-selected="true"]{
+      box-shadow: 0 0 10px rgba(88, 166, 255, 0.3) !important;
+      font-weight:700 !important;
+      transform: translateY(-1px);
+  }
+
   .hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;
       background:linear-gradient(90deg,#0D1117,#161B22);border:1px solid #30363D;border-radius:10px;
       padding:16px 22px;margin-bottom:14px;}
@@ -668,7 +687,7 @@ def show_table(df: pd.DataFrame, cols: list[str], mode: str, badge: tuple = ("St
                      column_config=COLUMN_CONFIG, **STRETCH)
 
 # ==========================================================
-# MAIN
+# MAIN EXECUTION
 # ==========================================================
 def main():
     st.set_page_config(page_title="Institutional Smart Money Terminal", page_icon="⚡", layout="wide")
