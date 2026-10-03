@@ -119,10 +119,13 @@ with tab1:
         p2.info(f"Delivery qty ≥ **{min_x}x** avg  |  Delivery % rise ≥ **+{min_pp}pp**   "
                 "(best combo: ye + Acc Days ≥ 2 + Stage 'Base' ya 'Early move')")
 
+    h1, h2 = st.columns(2)
+    only_acc = h1.checkbox("Sirf Accumulation / Strong Accumulation dikhao", value=True)
+    hide_ext = h2.checkbox("Extended (already ran) chhupao", value=True)
     f = st.columns(4)
     sig = f[0].multiselect("Signal", ["Strong Accumulation", "Accumulation", "Neutral", "Distribution",
-                                      "Low volume (ignore)"], default=["Strong Accumulation", "Accumulation"])
-    stg = f[1].multiselect("Stage (kitna chal chuka)", STAGES, default=STAGES[:3],
+                                      "Low volume (ignore)"], placeholder="All (khali = sab)")
+    stg = f[1].multiselect("Stage (kitna chal chuka)", STAGES, placeholder="All (khali = sab)",
                            help="Base = abhi 20D low se <5% upar, rally baki. Early move = 5–10%. "
                                 "Rally on = 10–18%. Extended = 18%+ ya 20 DMA se 10%+ upar (chase mat karo).")
     sec_sel = f[2].multiselect("Sector", sorted(pool.Sector.unique()))
@@ -132,7 +135,15 @@ with tab1:
         d = scr[scr.Symbol.isin(q)]
         st.caption("Search mode: selected stocks dikh rahe hain (filters ignore).")
     else:
-        d = pool[pool.Signal.isin(sig) & pool.Stage.isin(stg)]
+        d = pool
+        if sig:
+            d = d[d.Signal.isin(sig)]
+        elif only_acc:
+            d = d[d.Signal.isin(["Strong Accumulation", "Accumulation"])]
+        if stg:
+            d = d[d.Stage.isin(stg)]
+        elif hide_ext:
+            d = d[d.Stage != STAGES[3]]
         d = d[(d.Deliv_Qty_X >= min_x) & (d.Deliv_Per_Chg >= min_pp) & (d.Acc_Days_10D >= min_acc)]
         if sec_sel:
             d = d[d.Sector.isin(sec_sel)]
