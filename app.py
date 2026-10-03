@@ -49,6 +49,11 @@ if hist.empty or scr.empty:
     st.error("NSE data could not be loaded. NSE may be blocking this server or files are not yet "
              f"published (network errors: {info['errors']}). Click Refresh after a few minutes.")
     st.stop()
+if "Stage" not in scr.columns:
+    st.cache_data.clear()
+    st.error("engine.py purana version hai (Stage column missing). GitHub pe naya engine.py bhi upload karo "
+             "(app.py aur engine.py dono saath), phir app reboot karo.")
+    st.stop()
 ALL_SYMS = sorted(scr.Symbol.tolist())
 
 # ------------------------------ sidebar ----------------------------------- #
