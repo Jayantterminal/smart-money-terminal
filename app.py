@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
-import requests
-from datetime import datetime
-import pytz
+from engine import calculate_sector_flow, detect_silent_accumulation
 
 # ----------------- PAGE CONFIG -----------------
 st.set_page_config(
@@ -11,120 +9,53 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.title("🏛️ Institutional Smart Money Terminal")
-
-# ----------------- TIMEZONE SETUP (IST) -----------------
-IST = pytz.timezone('Asia/Kolkata')
-current_time_ist = datetime.now(IST).strftime('%d-%m-%Y %H:%M:%S')
-
-# ----------------- SIDEBAR: CONTROLS -----------------
-st.sidebar.header("⚙️ Terminal Controls")
-
-if st.sidebar.button("🔄 Refresh Data"):
-    st.cache_data.clear()
-    st.sidebar.success("Cache cleared! Fetching fresh data...")
-
-st.sidebar.markdown(f"**Last Sync Check (IST):** {current_time_ist}")
+st.title("🏛️ Institutional Smart Money & Swing Terminal")
+st.markdown("Zero-Broker, Rule-Based Institutional Footprint & Sector Rotation Tracker")
 
 # ----------------- TABS SETUP -----------------
-tab1, tab2, tab3 = st.tabs([
-    "📊 Tab 1: Institutional Sector Flow", 
-    "🎯 Tab 2: SMC Swing Screener", 
-    "📦 Tab 3: Institutional Delivery"
+tab1, tab2 = st.tabs([
+    "📊 Tab 1: Sector Rotation & Fortnightly Flow", 
+    "🎯 Tab 2: Stock Silent Accumulation & Swing"
 ])
 
 # ==============================================================================
-# TAB 1: INSTITUTIONAL CAPITAL FLOW & SECTOR ROTATION (WITH FALLBACK ENGINE)
+# TAB 1: SECTOR ROTATION
 # ==============================================================================
 with tab1:
-    st.subheader("NSE Sector Performance & Flow Tracker")
-    st.markdown("Automated live sector data engine with anti-blocking fallback architecture.")
+    st.subheader("Comparative Fortnightly Sector Shift")
+    st.markdown("Tracks institutional capital movement across sectors based on comparative base share shifts.")
 
-    @st.cache_data(ttl=600)
-    def fetch_robust_sector_data():
-        # Attempt 1: Direct NSE Public Endpoint
-        url = "https://www.nseindia.com/api/allIndices"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.nseindia.com/"
-        }
-        session = requests.Session()
-        try:
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            response = session.get(url, headers=headers, timeout=5)
-            
-            if response.status_code == 200:
-                data = response.json().get('data', [])
-                clean_records = []
-                for item in data:
-                    index_name = item.get('index', '')
-                    if "NIFTY" in index_name and not any(x in index_name for x in ["50", "NEXT", "MID", "SMALL", "100", "200", "500"]):
-                        sector_name = index_name.replace("NIFTY ", "").title()
-                        p_change = float(item.get('percentChange', 0))
-                        p_30d = float(item.get('perChange30d', 0) or 0)
-                        
-                        flow_shift = round(p_change - (p_30d / 30), 2)
-                        
-                        if flow_shift >= 1.5:
-                            signal = "🟢 Heavy Inflow"
-                        elif flow_shift > 0:
-                            signal = "🟢 Inflow"
-                        elif flow_shift == 0:
-                            signal = "⚪ Neutral"
-                        elif flow_shift <= -1.0:
-                            signal = "🔴 Heavy Outflow"
-                        else:
-                            signal = "🔴 Outflow"
-
-                        clean_records.append({
-                            "Sector": sector_name,
-                            "Last Price": item.get('last', 0),
-                            "1D Change (%)": p_change,
-                            "30D Change (%)": p_30d,
-                            "Flow Shift (%)": flow_shift,
-                            "Flow Signal": signal
-                        })
-                if clean_records:
-                    df = pd.DataFrame(clean_records)
-                    return df.sort_values(by="Flow Shift (%)", ascending=False).reset_index(drop=True)
-        except Exception:
-            pass
-
-        # Attempt 2: Fallback Reliable Engine (Guaranteed Live Table Display)
-        fallback_data = [
-            {"Sector": "Financial Services", "Last Price": 22450.10, "1D Change (%)": 1.45, "30D Change (%)": 3.20, "Flow Shift (%)": 1.34, "Flow Signal": "🟢 Inflow"},
-            {"Sector": "Information Technology", "Last Price": 38120.50, "1D Change (%)": 2.10, "30D Change (%)": 4.10, "Flow Shift (%)": 1.97, "Flow Signal": "🟢 Heavy Inflow"},
-            {"Sector": "Auto", "Last Price": 24100.80, "1D Change (%)": -0.80, "30D Change (%)": 1.50, "Flow Shift (%)": -0.85, "Flow Signal": "🔴 Outflow"},
-            {"Sector": "Fmcg", "Last Price": 56200.30, "1D Change (%)": 0.30, "30D Change (%)": -1.20, "Flow Shift (%)": 0.34, "Flow Signal": "🟢 Inflow"},
-            {"Sector": "Metal", "Last Price": 9150.20, "1D Change (%)": -1.90, "30D Change (%)": -2.10, "Flow Shift (%)": -1.83, "Flow Signal": "🔴 Heavy Outflow"},
-            {"Sector": "Pharma", "Last Price": 20300.40, "1D Change (%)": 0.65, "30D Change (%)": 2.10, "Flow Shift (%)": 0.58, "Flow Signal": "🟢 Inflow"}
-        ]
-        return pd.DataFrame(fallback_data)
-
-    df_flow = fetch_robust_sector_data()
-
-    if not df_flow.empty:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.dataframe(df_flow, use_container_width=True, hide_index=True)
-        with col2:
-            st.markdown("#### Live Stance")
-            heavy_inflow = df_flow[df_flow['Flow Signal'].str.contains("Heavy Inflow")]['Sector'].tolist()
-            outflows = df_flow[df_flow['Flow Signal'].str.contains("Outflow")]['Sector'].tolist()
-            st.success(f"**Inflows:** {', '.join(heavy_inflow) if heavy_inflow else 'None'}")
-            st.error(f"**Outflows count:** {len(outflows)}")
-    else:
-        st.warning("Data fetch failed. Please check network.")
+    # Sample data structure representing clean NSDL/Sector flow inputs
+    raw_sectors = [
+        {"Sector": "Financial Services", "val_curr": 29.01, "val_base": 26.50},
+        {"Sector": "Healthcare", "val_curr": 8.13, "val_base": 7.45},
+        {"Sector": "Information Technology", "val_curr": 5.85, "val_base": 6.80},
+        {"Sector": "Automobile and Auto Components", "val_curr": 7.13, "val_base": 7.59},
+        {"Sector": "Capital Goods", "val_curr": 11.33, "val_base": 11.61},
+        {"Sector": "Metals & Mining", "val_curr": 4.63, "val_base": 5.00}
+    ]
+    
+    df_sec = pd.DataFrame(raw_sectors)
+    df_processed_sec = calculate_sector_flow(df_sec)
+    
+    st.dataframe(df_processed_sec, use_container_width=True, hide_index=True)
 
 # ==============================================================================
-# TAB 2 & TAB 3 
+# TAB 2: SILENT ACCUMULATION & SWING SCREENER
 # ==============================================================================
 with tab2:
-    st.subheader("Smart Money Concepts (SMC) Swing Screener")
-    st.info("Active structural monitoring engine running.")
+    st.subheader("Silent Accumulation & Relative Strength Scanner")
+    st.markdown("Identifies stocks holding tight ranges or showing strength even when sectors/markets are consolidating.")
 
-with tab3:
-    st.subheader("Institutional Delivery & Volume Accumulation Scanner")
-    st.info("Delivery archive tracking active.")
+    # Sample stock structure mimicking Bhavcopy delivery and price movement analysis
+    raw_stocks = [
+        {"Symbol": "AXISBANK", "Sector": "Financial Services", "Stock_Change (%)": -0.20, "Delivery (%)": 72.5},
+        {"Symbol": "INFY", "Sector": "Information Technology", "Stock_Change (%)": 2.40, "Delivery (%)": 45.0},
+        {"Symbol": "NTPC", "Sector": "Power", "Stock_Change (%)": 0.10, "Delivery (%)": 68.0},
+        {"Symbol": "TATASTEEL", "Sector": "Metals & Mining", "Stock_Change (%)": -1.80, "Delivery (%)": 32.0}
+    ]
+
+    df_stk = pd.DataFrame(raw_stocks)
+    df_processed_stk = detect_silent_accumulation(df_stk)
+
+    st.dataframe(df_processed_stk, use_container_width=True, hide_index=True)
