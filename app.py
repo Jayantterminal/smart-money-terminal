@@ -148,6 +148,26 @@ with tab3:
         st.error(f"Error fetching data: {e}")
 
 with tab4:
-    st.subheader("NSDL Fortnightly FPI Inflow & Sector Rotation")
+    st.subheader("🌐 NSDL Fortnightly FPI Inflow & Sector Rotation")
+    st.caption("Framework: Minimum 2 Consecutive Fortnights Accumulation (Flow T > Flow T-1 > Flow T-2)")
+
     sec_flows = get_sector_fpi_status()
-    st.json(sec_flows)
+    rows = []
+    for sector, val in sec_flows.items():
+        curr = val.get("Current_Flow_Cr", 0)
+        prev = val.get("Prev_Flow_Cr", 0)
+        p2 = val.get("Prev2_Flow_Cr", 0)
+        two_spikes = "✅ Confirmed" if val.get("Two_Consecutive_Spike") else "❌ No"
+        phase = val.get("Trend_Phase", "Neutral")
+        
+        rows.append({
+            "Sector": sector,
+            "Latest Fortnight (₹ Cr)": f"+₹{curr:,} Cr" if curr > 0 else f"-₹{abs(curr):,} Cr",
+            "Prev Fortnight (₹ Cr)": f"+₹{prev:,} Cr" if prev > 0 else f"-₹{abs(prev):,} Cr",
+            "Fortnight T-2 (₹ Cr)": f"+₹{p2:,} Cr" if p2 > 0 else f"-₹{abs(p2):,} Cr",
+            "2x Consecutive Inflow": two_spikes,
+            "Lifecycle Phase": phase
+        })
+
+    flow_df = pd.DataFrame(rows)
+    st.dataframe(flow_df, use_container_width=True, hide_index=True)
