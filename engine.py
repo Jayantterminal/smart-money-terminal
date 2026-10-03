@@ -175,6 +175,19 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
         dist_days = int((strong & (l10.CLOSE_PRICE < l10.PREV_CLOSE)).sum())
         c = g.CLOSE_PRICE
         dma20 = c.tail(20).mean()
+        c60 = c.tail(60)
+        lo20, lo60, hi60 = c.tail(20).min(), c60.min(), c60.max()
+        run20 = (c.iloc[-1] / lo20 - 1) * 100
+        from_hi = (c.iloc[-1] / hi60 - 1) * 100
+        range_pos = (c.iloc[-1] - lo60) / (hi60 - lo60) * 100 if hi60 > lo60 else 50.0
+        if run20 >= 18 or c.iloc[-1] > dma20 * 1.10:
+            stage = "Extended (already ran)"
+        elif run20 >= 10:
+            stage = "Rally on"
+        elif run20 >= 5:
+            stage = "Early move"
+        else:
+            stage = "Base (not moved)"
 
         s = 0
         s += 25 if dq_x >= 2 else 18 if dq_x >= 1.5 else 10 if dq_x >= 1.2 else 0
@@ -200,6 +213,8 @@ def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: flo
             "Vol_X": round(float(vol_x), 2),
             "Acc_Days_10D": acc_days, "Dist_Days_10D": dist_days,
             "Avg_Turnover_Cr": round(float(turn_cr), 1),
+            "Run_20D": round(float(run20), 1), "From_60D_High": round(float(from_hi), 1),
+            "Range_Pos": round(float(range_pos), 0), "Stage": stage,
             "Score": int(s), "Signal": signal, **plan,
         })
     df = pd.DataFrame(rows)
