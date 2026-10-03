@@ -41,7 +41,7 @@ def kpi(col, label, value, sub="", cls=""):
 @st.cache_data(ttl=1800, show_spinner="Downloading NSE delivery data (first load can take ~30-60 sec)...")
 def load():
     hist, info = E.fetch_history(80)
-    scr = E.compute_screener(hist, (), 0.0) if not hist.empty else pd.DataFrame()
+    scr = E.compute_screener(hist, (), 0.0, E.fetch_sector_map()) if not hist.empty else pd.DataFrame()
     return hist, scr, info, E.now_ist()
 
 
@@ -62,6 +62,9 @@ SETUPS = ["In range (base)", "Breakout", "Trending / wide", "Breakdown"]
 BUYS = ["Continuing", "Just started", "Fading", "Not buying"]
 SIGNALS = ["Strong Accumulation", "Accumulation", "Neutral", "Distribution", "Low volume (ignore)"]
 ESTAT = {"In zone": "🟢 In zone", "Above zone (wait)": "🟡 Above zone", "Below zone": "🔴 Below zone"}
+FICON = {"Spike today": "🔥 Spike today", "Spike (last 3D)": "⚡ Spike (last 3D)",
+         "Building (5D)": "🔵 Building (5D)", "None": "-"}
+FRESH = ["Spike today", "Spike (last 3D)", "Building (5D)"]
 BICON = {"Continuing": "🟢 Continuing", "Just started": "🔵 Just started", "Fading": "🟡 Fading",
          "Not buying": "⚪ Not buying"}
 
@@ -102,12 +105,13 @@ tab1, tab2, tab3 = st.tabs(["🔎 Accumulation Screener", "🎯 Stock Plan", "�
 
 # ---------------------------- Screener ------------------------------------ #
 with tab1:
-    c = st.columns(5)
+    c = st.columns(6)
     kpi(c[0], "Stocks scanned", f"{len(pool)}", universe)
-    kpi(c[1], "Strong accumulation", int((pool.Signal == "Strong Accumulation").sum()), "score ≥ 75", "g")
-    kpi(c[2], "Accumulation", int((pool.Signal == "Accumulation").sum()), "score 55–74", "g")
+    kpi(c[1], "Strong accumulation", int((pool.Signal == "Strong Accumulation").sum()), "score ≥ 75 (all stages)", "g")
+    kpi(c[2], "Accumulation", int((pool.Signal == "Accumulation").sum()), "score 55–74 (all stages)", "g")
     kpi(c[3], "Buying continuing", int((pool.Buying_Status == "Continuing").sum()), "3+ of last 4 weeks", "g")
-    kpi(c[4], "Distribution", int((pool.Signal == "Distribution").sum()), "selling on strength", "r")
+    kpi(c[4], "⚡ Fresh spikes", int(pool.Fresh.isin(FRESH).sum()), f"today: {int((pool.Fresh == 'Spike today').sum())}", "y")
+    kpi(c[5], "Distribution", int((pool.Signal == "Distribution").sum()), "selling on strength", "r")
 
     q = st.multiselect("🔍 Search stock (type karte hi suggestions)", ALL_SYMS, placeholder="e.g. BAJ ... BAJAJHFL")
 
@@ -139,37 +143,63 @@ with tab1:
                                  help="In range = pichle 30 din ek range (≤25%) me. Breakout = range ke upar close.")
     buy_sel = f[3].multiselect("Buying status", BUYS, placeholder="All",
                                help="Pichle 4 hafte me kitne hafte net buying hui (up-day delivery > down-day delivery).")
-    g2 = st.columns(2)
-    sec_sel = g2[0].multiselect("Sector", sorted(pool.Sector.unique()), placeholder="All")
+    g2 = st.columns(3)
+    sec_sel = g2[0].multiselect("Sector / Industry", sorted(pool.Sector.unique()), placeholder="All")
     min_wk = g2[1].slider("Min buying weeks (last 4 me se)", 0, 4, 0)
+    fresh_sel = g2[2].multiselect("⚡ Fresh activity (achanak buying)", FRESH, placeholder="All",
+                                  help="Kisi din achanak delivery qty 3M avg se 2x+ hui to yahan turant dikhega "
+                                       "(1M wale Signal ko badalne me ek hafta lag sakta hai). Ise chuno to "
+                                       "Signal aur Scan preset ignore ho jaate hain.")
 
+    funnel = [("Universe", len(pool))]
     if q:
         d = scr[scr.Symbol.isin(q)]
-        st.caption("Search mode: selected stocks dikh rahe hain (filters ignore).")
+        funnel = [("Search", len(d))]
     else:
         d = pool
-        if sig:
+        if fresh_sel:
+            d = d[d.Fresh.isin(fresh_sel)]
+            funnel.append(("Fresh activity", len(d)))
+        elif sig:
             d = d[d.Signal.isin(sig)]
+            funnel.append(("Signal", len(d)))
         elif only_acc:
             d = d[d.Signal.isin(["Strong Accumulation", "Accumulation"])]
+            funnel.append(("Accumulation signal", len(d)))
         if stg:
             d = d[d.Stage.isin(stg)]
+            funnel.append(("Stage", len(d)))
         elif hide_ext:
             d = d[d.Stage != STAGES[3]]
+            funnel.append(("Extended hidden", len(d)))
+        if not fresh_sel:
+            d = d[(d.Deliv_Qty_X >= min_x) & (d.Deliv_Per_Chg >= min_pp)]
+            funnel.append(("Scan preset", len(d)))
         if setup_sel: d = d[d.Setup.isin(setup_sel)]
         if buy_sel: d = d[d.Buying_Status.isin(buy_sel)]
         if sec_sel: d = d[d.Sector.isin(sec_sel)]
-        d = d[(d.Deliv_Qty_X >= min_x) & (d.Deliv_Per_Chg >= min_pp) & (d.Buy_Weeks >= min_wk)]
-    st.caption(f"{len(d)} stocks | sorted by score | prices as of {asof:%d %b %Y}")
+        d = d[d.Buy_Weeks >= min_wk]
+        funnel.append(("Setup/Buying/Sector/Weeks", len(d)))
+        if fresh_sel:
+            d = d.sort_values("Last5_X", ascending=False)
+    st.caption(f"{len(d)} stocks | prices as of {asof:%d %b %Y}")
+    st.caption("🔻 Filter funnel:  " + "  →  ".join(f"{n}: **{c}**" for n, c in funnel) +
+               "   (KPI cards upar poori universe ke hain, filters se pehle)")
 
     view = d.copy()
     view["Entry_Status"] = view.Entry_Status.map(ESTAT)
     view["Buying_Status"] = view.Buying_Status.map(BICON)
+    view["Fresh"] = view.Fresh.map(FICON)
     cols = ["Symbol", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3", "Score", "Signal",
-            "Buying_Status", "Buy_Weeks", "Setup", "Stage", "Deliv_Qty_X", "Deliv_Per_Chg", "Net_Flow_1M",
-            "Deliv_Per_1M", "Deliv_Per_3M", "Acc_Days", "Range_Pct", "Chg_Pct", "Sector"]
+            "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage", "Deliv_Qty_X", "Today_X",
+            "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M", "Acc_Days", "Range_Pct",
+            "Chg_Pct", "Sector"]
     st.dataframe(view[cols], hide_index=True, width="stretch", height=560, column_config={
         "Symbol": st.column_config.TextColumn("Symbol", pinned=True),
+        "Fresh": st.column_config.TextColumn("Fresh activity"),
+        "Last5": st.column_config.TextColumn("Last 5 days", help="Purana → aaj. 🟢 strong delivery + price up, "
+                                             "🔴 strong delivery + price down, ⚪ normal"),
+        "Today_X": st.column_config.NumberColumn("Today deliv ÷ 3M avg", format="%.2fx"),
         "Price": st.column_config.NumberColumn("Price", format="₹%.2f"),
         "Entry_Zone": st.column_config.TextColumn("Entry zone (₹)"),
         "Entry_Status": st.column_config.TextColumn("Price vs zone"),
@@ -199,6 +229,11 @@ with tab1:
 - **Setup** In range (base) ya Breakout → 10
 - **Range hold** (price range ke neeche nahi toota) → 10
 - **Aaj ki delivered qty ≥ pichle 2M avg** → 10
+
+**Days + Weeks dono**: *Acc days /21* aur *Last 5 days* daily dikhate hain, *Buy weeks* weekly.
+**Fresh activity** achanak aaye spike pakadta hai: aaj ki delivered qty 3M avg se 2x+ (price up, delivery % +5pp)
+= Spike today; pichle 3 din me hua = Spike (last 3D); 5 din ki avg 1.5x+ aur net buying = Building.
+1M wala Signal slow hota hai, isliye achanak buying ke liye Fresh filter use karo.
 
 Smart money ek din me nahi kharidta - range ke andar hafton tak dheere dheere. Isliye daily nahi,
 **weekly net flow** dekha jata hai. Buying 'Continuing' = 3+ hafte buying aur last week bhi buying.
@@ -239,6 +274,8 @@ with tab2:
                f"delivery % {r.Deliv_Per_Chg:+.1f}pp.")
     why.append(f"Net buy flow {r.Net_Flow_1M:+.0f}% (pichle 2M: {r.Net_Flow_3M:+.0f}%); "
                f"{r.Acc_Days} accumulation din vs {r.Dist_Days} distribution din (last 21).")
+    why.append(f"Fresh activity: <b>{FICON[r.Fresh]}</b> | last 5 days: {r.Last5} | "
+               f"aaj ki delivered qty 3M avg ka {r.Today_X:.2f}x.")
     why.append("SL range ke lowest low ke neeche (ya breakout level ke neeche). Targets = range top aur "
                "range height ka projection. News/resistance khud check karo.")
     for w in why:
