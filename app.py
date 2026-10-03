@@ -130,7 +130,6 @@ TONE = {
 }
 ACTIONABLE_KEYS = ["ACTIVE", "BOS", "BEAR_ACTIVE", "BEAR_BOS"]
 
-
 # ==========================================================
 # HELPERS & AUTH
 # ==========================================================
@@ -142,29 +141,22 @@ def _stretch_kwargs() -> dict:
         pass
     return {"use_container_width": True}
 
-
 STRETCH = _stretch_kwargs()
-
 
 def now_ist() -> dt.datetime:
     return dt.datetime.now(IST)
 
-
 def market_state(now: dt.datetime) -> str:
-    # NOTE: NSE trading holidays are not modelled here.
     if now.weekday() >= 5:
         return "CLOSED (weekend)"
     if dt.time(9, 15) <= now.time() <= dt.time(15, 30):
         return "OPEN"
     return "CLOSED"
 
-
 def fmt_pct(x: float | None) -> str:
     return "n/a" if x is None or pd.isna(x) else f"{x:+.2f}%"
 
-
 def _master_key() -> tuple[str, bool]:
-    """Return (key, is_custom). Never crashes if secrets.toml is absent."""
     val = None
     try:
         val = st.secrets.get("TERMINAL_PASSWORD")
@@ -172,7 +164,6 @@ def _master_key() -> tuple[str, bool]:
         val = None
     val = val or os.environ.get("TERMINAL_PASSWORD")
     return (str(val), True) if val else (LEGACY_PASSWORD, False)
-
 
 def auth_gate() -> bool:
     st.session_state.setdefault("authenticated", False)
@@ -206,9 +197,8 @@ def auth_gate() -> bool:
                 st.error(f"Invalid security key. Attempts left: {max(left, 0)}")
     return False
 
-
 # ==========================================================
-# PILLAR 1 - SECTOR FLOW (derived)
+# PILLAR 1 - SECTOR FLOW
 # ==========================================================
 def sector_info(name: str) -> dict:
     sh = SECTOR_SHARES.get(name)
@@ -223,7 +213,6 @@ def sector_info(name: str) -> dict:
         signal = ("Heavy " if abs(shift) >= HEAVY_SHIFT else "") + ("Inflow" if status else "Outflow")
     return {"recent": recent, "base": base, "shift": shift, "status": status, "signal": signal}
 
-
 def build_sector_df() -> pd.DataFrame:
     rows = []
     for name in SECTOR_SHARES:
@@ -237,7 +226,6 @@ def build_sector_df() -> pd.DataFrame:
             "_tone": "g" if i["status"] is True else "r" if i["status"] is False else "n",
         })
     return pd.DataFrame(rows).sort_values("Flow Shift (%)", ascending=False).reset_index(drop=True)
-
 
 # ==========================================================
 # MARKET REGIME & QUOTE FETCHER
@@ -269,7 +257,6 @@ def get_market_regime() -> dict:
         "sensex": s_cmp, "sensex_chg": (s_cmp / s_prev - 1) * 100,
         "ema20": ema20, "ema50": ema50,
     }
-
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
@@ -318,13 +305,11 @@ def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
             continue
     return {"quotes": quotes, "fetched_at": fetched_at}
 
-
 # ==========================================================
-# EVALUATION CORE (BULLISH & BEARISH CHoCH + BOS)
+# EVALUATION CORE
 # ==========================================================
 def build_radar() -> pd.DataFrame:
     return pd.DataFrame(RADAR_ROWS, columns=RADAR_COLUMNS)
-
 
 def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
                     stale_pct: float = STALE_DEVIATION_PCT) -> pd.DataFrame:
@@ -335,7 +320,6 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
         cmp_ = q["cmp"] if q else None
         last_close = q["last_close"] if q else None
 
-        # FIX: bearish rows store zone_low > zone_high -> normalise
         zl, zh = min(r["zone_low"], r["zone_high"]), max(r["zone_low"], r["zone_high"])
 
         info = sector_info(r["sector"])
@@ -408,7 +392,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
                     key, status, action = "EXTENDED", "🟠 EXTENDED – NO CHASE", f"BOUNCE WAIT (-{ext:.1f}%)"
                 else:
                     key, status, action = "BEAR_ACTIVE", "🔻 ACTIVE (BEARISH CHoCH)", "EXIT / SHORT (15m BREAKDOWN)"
-            elif zl <= cmp_ <= zh:  # FIX: previously never true
+            elif zl <= cmp_ <= zh:
                 key, status, action = "ZONE", "🔴 IN DISTRIBUTION ZONE", "DISTRIBUTING – WAIT BREAKDOWN"
             else:
                 key, status, action = "PRE", "⚪ TRACKING SUPPLY", "SUPPLY RESISTANCE INTACT"
@@ -434,9 +418,8 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
     df = pd.DataFrame(out)
     return df.sort_values(["_rank", "Volume Spurt (x)"], ascending=[True, False]).reset_index(drop=True)
 
-
 # ==========================================================
-# TABLE RENDERING (numbered + bordered)
+# TABLE RENDERING
 # ==========================================================
 EXPORT_COLUMNS = [
     "Symbol", "Company", "Sector", "Bias", "Sector Flow", "Tradable (3-Pillar)", "Status", "Action",
@@ -449,7 +432,6 @@ COMPACT_COLUMNS = [
     "Target 1", "R:R (T1)", "Volume Spurt (x)", "Delivery %",
 ]
 
-# column -> (formatter, colour-by-sign)
 FORMATS = {
     "Day %": (lambda v: f"{v:+.2f}%", True),
     "Dist. to CHoCH %": (lambda v: f"{v:+.2f}%", False),
@@ -467,7 +449,6 @@ FORMATS = {
     "Qty": (lambda v: f"{int(v):,}", False),
 }
 
-
 def fmt_cell(col: str, v) -> tuple[str, str]:
     if v is None or (isinstance(v, (float, np.floating)) and np.isnan(v)):
         return "—", "num"
@@ -478,7 +459,6 @@ def fmt_cell(col: str, v) -> tuple[str, str]:
             cls += " pos" if v > 0 else " neg" if v < 0 else ""
         return fn(v), cls
     return html.escape(str(v)), ""
-
 
 def html_table(df: pd.DataFrame, cols: list[str], badge_cols: tuple = (), height: int = 560) -> str:
     if df.empty:
@@ -498,21 +478,18 @@ def html_table(df: pd.DataFrame, cols: list[str], badge_cols: tuple = (), height
     return (f"<div class='tbl-wrap' style='max-height:{height}px'><table class='smc'>"
             f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div>")
 
-
 def numbered(df: pd.DataFrame) -> pd.DataFrame:
     d = df.reset_index(drop=True).copy()
     d.insert(0, "No.", np.arange(1, len(d) + 1))
     return d
-
 
 def section(num: str, title: str, sub: str = "") -> None:
     sub_html = f"<span class='sec-sub'>{html.escape(sub)}</span>" if sub else ""
     st.markdown(f"<div class='sec'><span class='sec-no'>{num}</span>{html.escape(title)}{sub_html}</div>",
                 unsafe_allow_html=True)
 
-
 # ==========================================================
-# EXCEL GENERATOR (numbered + bordered)
+# EXCEL GENERATOR
 # ==========================================================
 XL_FMT = {
     "CMP (Rs)": "#,##0.00", "CHoCH Trigger (Rs)": "#,##0.00", "BOS Level (Rs)": "#,##0.00",
@@ -523,7 +500,6 @@ XL_FMT = {
     "R:R (T1)": "0.00", "Volume Spurt (x)": '0.00"x"',
     "Recent 12D Share (%)": '0.00"%"', "Base Share (%)": '0.00"%"',
 }
-
 
 def _write_sheet(ws, df: pd.DataFrame, cols: list[str], freeze: str) -> None:
     head_fill = PatternFill("solid", start_color="161B22", end_color="161B22")
@@ -560,7 +536,6 @@ def _write_sheet(ws, df: pd.DataFrame, cols: list[str], freeze: str) -> None:
     ws.freeze_panes = freeze
     ws.auto_filter.ref = ws.dimensions
 
-
 def generate_excel_export(df: pd.DataFrame, sec_df: pd.DataFrame) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -571,7 +546,6 @@ def generate_excel_export(df: pd.DataFrame, sec_df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
-
 
 # ==========================================================
 # TRADE BOOK ENGINE
@@ -585,12 +559,10 @@ def load_trades() -> list:
             pass
     return []
 
-
 def save_trades(trades: list) -> None:
     os.makedirs(os.path.dirname(TRADE_BOOK_PATH), exist_ok=True)
     with open(TRADE_BOOK_PATH, "w", encoding="utf-8") as f:
         json.dump(trades, f, indent=2)
-
 
 def trade_row(t: dict, quotes: dict) -> dict:
     side = t.get("side", "LONG")
@@ -607,7 +579,6 @@ def trade_row(t: dict, quotes: dict) -> dict:
         "Status": t.get("status", "OPEN"), "Opened": t.get("date", ""),
         "_tone": "n" if np.isnan(pnl) else "g" if pnl > 0 else "r" if pnl < 0 else "n",
     }
-
 
 # ==========================================================
 # UI STYLING
@@ -626,7 +597,6 @@ CSS = """
       border-radius:6px 6px 0 0;color:#C9D1D9;padding:8px 18px;}
   .stTabs [aria-selected="true"]{background-color:#21262D !important;color:#58A6FF !important;
       border-bottom:2px solid #58A6FF !important;}
-  /* header */
   .hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;
       background:linear-gradient(90deg,#0D1117,#161B22);border:1px solid #30363D;border-radius:10px;
       padding:16px 22px;margin-bottom:14px;}
@@ -636,13 +606,11 @@ CSS = """
   .chip{border:1px solid #30363D;background:#0D1117;color:#C9D1D9;border-radius:999px;padding:5px 12px;
       font-size:12px;font-family:'JetBrains Mono',monospace;}
   .chip b{color:#8B949E;font-weight:600;margin-right:6px;font-family:inherit;}
-  /* section titles */
   .sec{display:flex;align-items:center;gap:10px;margin:18px 0 10px;font-size:17px;font-weight:700;color:#F0F6FC;
       border-bottom:1px solid #30363D;padding-bottom:8px;}
   .sec-no{background:#1F6FEB;color:#fff;border-radius:5px;padding:1px 9px;font-size:13px;
       font-family:'JetBrains Mono',monospace;}
   .sec-sub{margin-left:auto;font-size:12px;font-weight:400;color:#8B949E;}
-  /* bordered tables */
   .tbl-wrap{overflow:auto;border:1px solid #30363D;border-radius:8px;background:#0D1117;}
   table.smc{border-collapse:collapse;width:100%;font-size:12.5px;}
   table.smc th{position:sticky;top:0;z-index:2;background:#161B22;color:#8B949E;border:1px solid #30363D;
@@ -692,14 +660,12 @@ COLUMN_CONFIG = {
     "Flow Shift (%)": st.column_config.NumberColumn(format="%+.2f%%"),
 }
 
-
 def show_table(df: pd.DataFrame, cols: list[str], mode: str, badge: tuple = ("Status",), height: int = 560) -> None:
     if mode == "Bordered Report":
         st.markdown(html_table(df, cols, badge_cols=badge, height=height), unsafe_allow_html=True)
     else:
         st.dataframe(numbered(df[cols]), hide_index=True, height=height,
                      column_config=COLUMN_CONFIG, **STRETCH)
-
 
 # ==========================================================
 # MAIN
@@ -790,17 +756,17 @@ def main():
     with tab2:
         section("2.1", "NSE Institutional Capital Flow (22 Sectors)", "Rule: Longs only in Inflow, Shorts only in Outflow")
         s_cols = ["Sector", "Recent 12D Share (%)", "Base Share (%)", "Flow Shift (%)", "Flow Signal"]
-        n_in = int((sec_df["_status"] == True).sum())  # noqa: E712
-        n_out = int((sec_df["_status"] == False).sum())  # noqa: E712
+        n_in = int((sec_df["_status"] == True).sum())
+        n_out = int((sec_df["_status"] == False).sum())
         c1, c2, c3 = st.columns(3)
         c1.metric("Inflow Sectors", n_in)
         c2.metric("Outflow Sectors", n_out)
         c3.metric("Neutral", len(sec_df) - n_in - n_out)
 
         section("2.2", "🟢 Inflow Sectors")
-        show_table(sec_df[sec_df["_status"] == True], s_cols, view_mode, badge=("Flow Signal",), height=330)  # noqa: E712
+        show_table(sec_df[sec_df["_status"] == True], s_cols, view_mode, badge=("Flow Signal",), height=330)
         section("2.3", "🔴 Outflow Sectors")
-        show_table(sec_df[sec_df["_status"] == False], s_cols, view_mode, badge=("Flow Signal",), height=480)  # noqa: E712
+        show_table(sec_df[sec_df["_status"] == False], s_cols, view_mode, badge=("Flow Signal",), height=480)
         neutral = sec_df[sec_df["_status"].isna()]
         if not neutral.empty:
             section("2.4", "⚪ Neutral Sectors")
@@ -842,7 +808,7 @@ def main():
         k[3].metric("Win Rate (Closed)", win)
 
         section("4.2", "Log New Position")
-        s_sym = st.selectbox("Symbol", radar["symbol"].tolist())  # outside form -> defaults follow symbol
+        s_sym = st.selectbox("Symbol", radar["symbol"].tolist())
         row_match = radar.loc[radar["symbol"] == s_sym].iloc[0]
         is_long = row_match["bias"] == "BULLISH"
         default_p = (quotes.get(s_sym) or {}).get("cmp", row_match["snap_cmp"])
@@ -925,7 +891,6 @@ def main():
     st.markdown("<div class='foot'>For educational and research use only. Not investment advice. "
                 "Data via Yahoo Finance may be delayed or incomplete; verify before trading. "
                 "Radar levels are static snapshots - refresh them regularly.</div>", unsafe_allow_html=True)
-
 
 if __name__ == "__main__":
     main()
