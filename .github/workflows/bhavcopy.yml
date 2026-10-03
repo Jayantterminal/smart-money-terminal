@@ -1,0 +1,37 @@
+name: Daily NSE Bhavcopy Ingestion & Purge
+
+on:
+  schedule:
+    # Runs Monday to Friday at 1:30 PM UTC (7:00 PM IST)
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch: # Allows manual trigger anytime from GitHub UI
+
+jobs:
+  update-bhavcopy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Daily Bhavcopy Fetch & 3-Month Prune
+        run: |
+          python -c "from engine import update_bhavcopy_store; success, msg = update_bhavcopy_store(); print(msg)"
+
+      - name: Commit & Push Updated Rolling Database
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-sync daily Bhavcopy & rolling 3M purge [skip ci]" && git push)
