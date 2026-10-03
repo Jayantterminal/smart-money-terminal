@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, time
-from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
+import pytz
 
 # ----------------- PAGE CONFIG -----------------
 st.set_page_config(
@@ -13,40 +13,37 @@ st.set_page_config(
 
 st.title("🏛️ Institutional Smart Money Terminal")
 
-# ----------------- SIDEBAR: REFRESH ENGINE -----------------
+# ----------------- TIMEZONE SETUP (IST) -----------------
+IST = pytz.timezone('Asia/Kolkata')
+current_time_ist = datetime.now(IST).strftime('%d-%m-%Y %H:%M:%S')
+
+# ----------------- SIDEBAR: CONTROLS -----------------
 st.sidebar.header("⚙️ Terminal Controls")
 
-# Manual Refresh Button
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.sidebar.success("Cache cleared! Fetching fresh data...")
 
-# Auto-Refresh Toggle
-auto_refresh_enabled = st.sidebar.checkbox("Enable Auto-Refresh (10 Mins)", value=False)
-if auto_refresh_enabled:
-    # Auto refresh every 10 minutes (600,000 milliseconds)
-    st_autorefresh(interval=600000, key="datarefresh")
-
-st.sidebar.markdown(f"**Last Sync Check:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
+st.sidebar.markdown(f"**Last Sync Check (IST):** {current_time_ist}")
 
 # ----------------- TABS SETUP -----------------
 tab1, tab2, tab3 = st.tabs([
-    "📊 Tab 1: Granular Sector Rotation", 
+    "📊 Tab 1: Institutional Sector Flow", 
     "🎯 Tab 2: SMC Swing Screener", 
     "📦 Tab 3: Institutional Delivery"
 ])
 
 # ==============================================================================
-# TAB 1: GRANULAR SECTOR & INDUSTRY PERFORMANCE
+# TAB 1: INSTITUTIONAL CAPITAL FLOW & SECTOR ROTATION
 # ==============================================================================
 with tab1:
-    st.subheader("Granular Industry & Sector Performance (Daily EOD)")
-    st.markdown("Yeh view market ki micro-industries (jaise Rubber Products, Paints, Telecom, etc.) ka daily momentum track karta hai.")
+    st.subheader("NSE Institutional Capital Flow & Sector Rotation")
+    st.markdown("Yeh view sectors ke institutional flow shifts (Inflow / Heavy Inflow / Outflow) ko clean format me track karta hai.")
 
     @st.cache_data(ttl=3600)
-    def fetch_granular_sector_data():
+    def fetch_institutional_sector_flow():
         """
-        NSE indices aur granular industry mapping fetch karne ka secure wrapper.
+        NSE indices fetch karke clean sectoral institutional flow format generate karta hai.
         """
         url = "https://www.nseindia.com/api/allIndices"
         headers = {
@@ -60,52 +57,78 @@ with tab1:
             res = session.get(url, headers=headers, timeout=10)
             data = res.json().get('data', [])
             
+            # Target clean sectors mapping
+            allowed_sectors = [
+                'NIFTY FINANCIAL SERVICES', 'NIFTY BANK', 'NIFTY IT', 
+                'NIFTY AUTO', 'NIFTY METAL', 'NIFTY PHARMA', 'NIFTY FMCG', 
+                'NIFTY REALTY', 'NIFTY ENERGY', 'NIFTY INFRASTRUCTURE', 
+                'NIFTY MEDIA', 'NIFTY CONSUMER DURABLES', 'NIFTY OIL & GAS', 
+                'NIFTY PSU BANK', 'NIFTY PRIVATE BANK'
+            ]
+            
             clean_data = []
             for item in data:
                 index_name = item.get('index', '')
-                # Filter for sectoral and thematic indices
-                if "NIFTY" in index_name:
+                if index_name in allowed_sectors:
+                    # Clean sector name display
+                    sector_display = index_name.replace("NIFTY ", "").title()
+                    pct_1d = float(item.get('percentChange', 0))
+                    pct_30d = float(item.get('perChange30d', 0))
+                    
+                    # Flow Shift calculation logic
+                    flow_shift = round(pct_1d - (pct_30d / 30), 2)
+                    
+                    # Assigning Flow Signals
+                    if flow_shift >= 1.5:
+                        signal = "🟢 Heavy Inflow"
+                    elif flow_shift > 0:
+                        signal = "🟢 Inflow"
+                    elif flow_shift == 0:
+                        signal = "⚪ Neutral"
+                    else:
+                        signal = "🔴 Outflow"
+
                     clean_data.append({
-                        "Industry / Sector": index_name,
-                        "Last Price": float(item.get('last', 0)),
-                        "1D Price Change (%)": float(item.get('percentChange', 0)),
-                        "30D Change (%)": float(item.get('perChange30d', 0)),
+                        "Sector": sector_display,
+                        "Current 1D Change (%)": pct_1d,
+                        "30D Change (%)": pct_30d,
+                        "Flow Shift (%)": flow_shift,
+                        "Flow Signal": signal
                     })
             
             df = pd.DataFrame(clean_data)
             return df
-        except Exception as e:
-            # Fallback dummy structure agar NSE API market hours ke baad restricted ho
+        except Exception:
             return pd.DataFrame()
 
-    df_sectors = fetch_granular_sector_data()
+    df_flow = fetch_institutional_sector_flow()
 
-    if not df_sectors.empty:
-        # Sort by 1D change descending
-        df_sectors = df_sectors.sort_values(by="1D Price Change (%)", ascending=False).reset_index(drop=True)
+    if not df_flow.empty:
+        # Sort by Flow Shift descending
+        df_flow = df_flow.sort_values(by="Flow Shift (%)", ascending=False).reset_index(drop=True)
         
-        # Display metrics layout
         col1, col2 = st.columns([3, 1])
         with col1:
             st.dataframe(
-                df_sectors,
+                df_flow,
                 use_container_width=True,
                 hide_index=True
             )
         with col2:
-            st.markdown("#### Top Gainers & Losers")
-            top_gainer = df_sectors.iloc[0]['Industry / Sector'] if len(df_sectors) > 0 else "N/A"
-            top_loser = df_sectors.iloc[-1]['Industry / Sector'] if len(df_sectors) > 0 else "N/A"
-            st.success(f"**Top Gainer:** {top_gainer}")
-            st.error(f"**Top Loser:** {top_loser}")
+            st.markdown("#### Flow Summary")
+            heavy_inflow = df_flow[df_flow['Flow Signal'] == "🟢 Heavy Inflow"]['Sector'].tolist()
+            outflows = df_flow[df_flow['Flow Signal'] == "🔴 Outflow"]['Sector'].tolist()
+            
+            st.success(f"**Heavy Inflow:** {', '.join(heavy_inflow) if heavy_inflow else 'None'}")
+            st.error(f"**Outflow Sectors:** {', '.join(outflows) if outflows else 'None'}")
     else:
-        st.warning("Live NSE data connect nahi ho saka. Shaam ko Bhavcopy publish hone ke baad data yahan reflect hoga. 'Refresh Data' button dabakar dubara koshish karein.")
+        st.warning("Live NSE data connect nahi ho saka. Refresh button dabakar dobara koshish karein.")
 
 # ==============================================================================
 # TAB 2 & TAB 3 (PLACEHOLDERS)
 # ==============================================================================
 with tab2:
-    st.info("Tab 1 verify hone ke baad Tab 2 ka SMC Swing Screener yahan add kiya jayega.")
+    st.info("Tab 2: SMC Swing Screener (Pending)")
 
 with tab3:
-    st.info("Tab 3 ka Institutional Delivery Analytics yahan integrate hoga.")
+    st.info("Tab 3: Institutional Delivery (Pending)")
