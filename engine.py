@@ -1,599 +1,465 @@
 """
-app.py - Smart Money Terminal
-Delivery-based accumulation: 1 month vs previous 2 months, fresh spikes, sector rotation, trade plan.
-Run: streamlit run app.py
+engine.py - Delivery-based accumulation engine (NSE bhavcopy)
+Source: NSE sec_bhavdata_full_DDMMYYYY.csv (price, volume, delivery qty, delivery %)
 """
-import hashlib
+from __future__ import annotations
 
-import numpy as np
+import datetime as dt
+import io
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor
+from zoneinfo import ZoneInfo
+
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-from plotly.subplots import make_subplots
+import requests
 
-import engine as E
-
-st.set_page_config(page_title="Smart Money Terminal", page_icon="📈", layout="wide")
-
-st.markdown("""
-<style>
-.block-container{padding-top:1rem;max-width:1500px}
-.topbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;
- padding:12px 18px;border-radius:12px;background:linear-gradient(90deg,#0f172a,#1e293b);
- border:1px solid #334155;margin-bottom:14px}
-.brand{font-size:1.35rem;font-weight:800;color:#f8fafc;letter-spacing:.5px}
-.brand span{color:#22c55e}
-.meta{color:#94a3b8;font-size:.82rem}
-.kpi{background:#0f172a;border:1px solid #334155;border-radius:12px;padding:12px 16px;height:100%}
-.kpi .l{color:#94a3b8;font-size:.72rem;text-transform:uppercase;letter-spacing:.8px}
-.kpi .v{color:#f8fafc;font-size:1.2rem;font-weight:700}
-.kpi .d{font-size:.8rem;font-weight:600;color:#94a3b8}
-.g{color:#22c55e!important}.r{color:#ef4444!important}.y{color:#f59e0b!important}
-.why{background:#0f172a;border-left:3px solid #22c55e;padding:8px 14px;margin:5px 0;
- border-radius:6px;color:#e2e8f0;font-size:.9rem}
-.st-key-kpis button{width:100%;height:92px;border-radius:12px;border:1px solid #334155;
- background:#0f172a;white-space:pre-line;line-height:1.35}
-.st-key-kpis button p{font-size:.95rem;font-weight:600}
-.st-key-kpis button:hover{border-color:#22c55e}
-</style>
-""", unsafe_allow_html=True)
-
-
-def kpi(col, label, value, sub="", cls=""):
-    col.markdown(f'<div class="kpi"><div class="l">{label}</div><div class="v {cls}">{value}</div>'
-                 f'<div class="d">{sub}</div></div>', unsafe_allow_html=True)
-
-
-@st.cache_data(ttl=1800, show_spinner="Downloading NSE delivery data (first load can take ~30-60 sec)...")
-def load():
-    hist, info = E.fetch_history(80)
-    scr = E.compute_screener(hist, (), 0.0, E.fetch_sector_map()) if not hist.empty else pd.DataFrame()
-    return hist, scr, info, E.now_ist()
-
-
-hist, scr, info, fetched = load()
-if hist.empty or scr.empty:
-    st.error("NSE data could not be loaded. NSE may be blocking this server or files are not yet "
-             f"published (network errors: {info['errors']}). Click Refresh after a few minutes.")
-    st.stop()
-if "Ret_3M" not in scr.columns:
-    st.cache_data.clear()
-    st.error("engine.py purana version hai. GitHub pe engine.py aur app.py dono naye upload karo, "
-             "phir app reboot karo.")
-    st.stop()
-ALL_SYMS = sorted(scr.Symbol.tolist())
-
-STAGES = ["Base (not moved)", "Early move", "Rally on", "Extended (already ran)"]
-SETUPS = ["In range (base)", "Breakout", "Trending / wide", "Breakdown"]
-BUYS = ["Continuing", "Just started", "Fading", "Not buying"]
-SIGNALS = ["Strong Accumulation", "Accumulation", "Neutral", "Distribution", "Low volume (ignore)"]
-FRESH = list(E.FRESH_SET)
-FRESH_SEL = ["All fresh"] + FRESH
-ESTAT = {"In zone": "🟢 In zone", "Above zone (wait)": "🟡 Above zone", "Below zone": "🔴 Below zone"}
-FICON = {"Spike today": "🔥 Spike today", "Spike (last 3D)": "⚡ Spike (last 3D)",
-         "Building (5D)": "🔵 Building (5D)", "None": "-"}
-BICON = {"Continuing": "🟢 Continuing", "Just started": "🔵 Just started", "Fading": "🟡 Fading",
-         "Not buying": "⚪ Not buying"}
-QICON = {"Leading": "🟢 Leading", "Improving": "🔵 Improving", "Weakening": "🟡 Weakening", "Lagging": "🔴 Lagging"}
-QCOL = {"Leading": "#22c55e", "Improving": "#3b82f6", "Weakening": "#f59e0b", "Lagging": "#ef4444"}
-
-# ------------------------------ sidebar ----------------------------------- #
-with st.sidebar:
-    st.markdown("### ⚙️ Controls")
-    if st.button("🔄 Refresh data now"):
-        st.cache_data.clear()
-        st.rerun()
-    universe = st.radio(
-        "Universe", ["My watchlist", "All liquid NSE stocks"], index=1,
-        help="My watchlist = sirf wo ~60 stocks jo engine.py ki WATCHLIST me hain + jo tum neeche add karo.\n\n"
-             "All liquid NSE = NSE ke saare EQ stocks jinka avg daily turnover niche slider se zyada hai.")
-    min_turn = st.slider("Min avg turnover (₹ Cr/day)", 0, 100, 5,
-                         help="Sirf 'All liquid NSE' pe lagta hai. 5–10 Cr swing trading ke liye theek hai.")
-    extras = st.multiselect("Add stocks to My watchlist", ALL_SYMS, placeholder="Type symbol...")
-    st.caption("Source: NSE bhavcopy (end-of-day), delivery data ~6-7 PM IST ke baad aata hai. "
-               "Analysis tool only, not investment advice.")
-
-asof = hist.Date.max()
-st.markdown(f"""
-<div class="topbar">
- <div class="brand">SMART<span>MONEY</span> TERMINAL</div>
- <div class="meta">Data as of <b>{asof:%d %b %Y}</b> (EOD) &nbsp;|&nbsp;
- Fetched <b>{fetched:%d %b %Y, %I:%M %p} IST</b> &nbsp;|&nbsp; Sessions loaded: <b>{info['days']}</b>
- &nbsp;|&nbsp; Window: <b>1M vs previous 2M</b></div>
-</div>""", unsafe_allow_html=True)
-if info["errors"]:
-    st.warning(f"{info['errors']} din ka NSE data download nahi ho paya - Refresh karke dekho.")
-
-# ---- Data sanity checks ----
-_warn = []
-if info.get("days", 0) < 40:
-    _warn.append(f"Sirf {info['days']} sessions mile — 3M comparison weak ho sakta hai.")
-try:
-    if scr.Deliv_Per_1M.gt(100).any():
-        _warn.append(f"{int(scr.Deliv_Per_1M.gt(100).sum())} stocks me delivery % > 100 — NSE source data suspicious.")
-    if (scr.Price <= 0).any():
-        _warn.append("Kuch stocks ka price 0 hai — bhavcopy row corrupt.")
-    if scr.Deliv_Qty_X.gt(20).any():
-        _warn.append(f"{int(scr.Deliv_Qty_X.gt(20).sum())} stocks me Deliv qty 1M÷3M > 20x — split/bonus adjust issue ho sakta hai.")
-except Exception:
-    pass
-if _warn:
-    st.warning("**Data warnings:**\n- " + "\n- ".join(_warn))
-
-watch_all = set(E.SECTOR_OF) | set(extras)
-if universe == "My watchlist":
-    pool = scr[scr.Symbol.isin(watch_all)]
-else:
-    pool = scr[(scr.Avg_Turnover_Cr >= min_turn) | scr.Symbol.isin(extras)]
-
-
-# --------------------------- shared pieces -------------------------------- #
-def render_detail(sym: str, k: str):
-    r = scr[scr.Symbol == sym].iloc[0]
-    g = E.symbol_view(hist, sym).tail(80)
-    st.markdown(f"### {sym}  <span style='color:#94a3b8;font-size:.9rem'>{r.Sector}</span>", unsafe_allow_html=True)
-
-    sc = "g" if r.Score >= 55 else "y" if r.Score >= 35 else "r"
-    bc = {"Continuing": "g", "Just started": "g", "Fading": "y", "Not buying": "r"}[r.Buying_Status]
-    c = st.columns(6)
-    kpi(c[0], "Last price", f"₹{r.Price:,.2f}", f"{r.Chg_Pct:+.2f}% today", "g" if r.Chg_Pct >= 0 else "r")
-    kpi(c[1], "Accumulation score", f"{r.Score}/100", r.Signal, sc)
-    kpi(c[2], "Buying status", r.Buying_Status, f"{r.Buy_Weeks}/4 weeks net buying", bc)
-    kpi(c[3], "Delivered qty 1M÷3M", f"{r.Deliv_Qty_X:.2f}x", f"{r.Deliv_Qty_1M:,} vs {r.Deliv_Qty_3M:,}")
-    kpi(c[4], "Delivery % 1M vs prev 2M", f"{r.Deliv_Per_1M:.1f}%", f"was {r.Deliv_Per_3M:.1f}% ({r.Deliv_Per_Chg:+.1f}pp)")
-    kpi(c[5], "Net buy flow 1M", f"{r.Net_Flow_1M:+.0f}%", f"prev 2M {r.Net_Flow_3M:+.0f}%",
-        "g" if r.Net_Flow_1M > 0 else "r")
-
-    st.markdown("#### Trade plan (range based)")
-    c = st.columns(5)
-    kpi(c[0], "Price vs Entry zone", f"₹{r.Price:,.2f}  |  ₹{r.Entry_Low:,.2f}–{r.Entry_High:,.2f}",
-        f"{ESTAT[r.Entry_Status]} ({r.Entry_Gap:+.1f}% vs entry)")
-    kpi(c[1], "Stop loss", f"₹{r.SL:,.2f}", f"-{r.Risk_Pct:.1f}% from entry", "r")
-    for i, tk in enumerate(["T1", "T2", "T3"]):
-        kpi(c[2 + i], f"Target {i + 1}", f"₹{r[tk]:,.2f}", f"+{(r[tk] / r.Entry - 1) * 100:.1f}% from entry", "g")
-
-    why = [f"Setup: <b>{r.Setup}</b> - 30D range ₹{r.Range_Lo:,.2f} to ₹{r.Range_Hi:,.2f} ({r.Range_Pct}%). {r.Plan_Status}."]
-    if r.Stage.startswith("Extended"):
-        why.append("Stock pehle hi kaafi chal chuka hai - pullback/retest pe hi socho, chase mat karo.")
-    elif r.Stage.startswith("Base"):
-        why.append("Price abhi 20D low ke paas hai - move shuru hona baki ho sakta hai.")
-    why.append(f"1 mahine me delivered qty pichle 2 mahine ke avg se {r.Deliv_Qty_X:.2f}x; "
-               f"delivery % {r.Deliv_Per_Chg:+.1f}pp.")
-    why.append(f"Net buy flow {r.Net_Flow_1M:+.0f}% (pichle 2M: {r.Net_Flow_3M:+.0f}%); "
-               f"{r.Acc_Days} accumulation din vs {r.Dist_Days} distribution din (last 21).")
-    why.append(f"Fresh activity: <b>{FICON[r.Fresh]}</b> | last 5 days: {r.Last5} | "
-               f"aaj ki delivered qty 3M avg ka {r.Today_X:.2f}x.")
-    why.append("SL range ke lowest low ke neeche (ya breakout level ke neeche). Targets = range top aur "
-               "range height ka projection. News/resistance khud check karo.")
-    for w in why:
-        st.markdown(f'<div class="why">{w}</div>', unsafe_allow_html=True)
-
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.22, 0.23],
-                        vertical_spacing=0.03, subplot_titles=("Price with plan", "Delivery %", "Delivered quantity"))
-    fig.add_trace(go.Candlestick(x=g.Date, open=g.OPEN_PRICE, high=g.HIGH_PRICE, low=g.LOW_PRICE,
-                                 close=g.CLOSE_PRICE, name=sym), row=1, col=1)
-    fig.add_trace(go.Scatter(x=g.Date, y=g.CLOSE_PRICE.rolling(20).mean(), name="20 DMA",
-                             line=dict(color="#f59e0b", width=1.3)), row=1, col=1)
-    fig.add_hrect(y0=r.Range_Lo, y1=r.Range_Hi, fillcolor="#38bdf8", opacity=0.07, line_width=0, row=1, col=1)
-    for lvl, col, name in [(r.Entry, "#38bdf8", "Entry"), (r.SL, "#ef4444", "SL"), (r.T1, "#22c55e", "T1"),
-                           (r.T2, "#22c55e", "T2"), (r.T3, "#22c55e", "T3")]:
-        fig.add_hline(y=lvl, line_dash="dot", line_color=col, annotation_text=f"{name} {lvl:,.1f}",
-                      annotation_position="right", row=1, col=1)
-    colors = np.where((g.CLOSE_PRICE >= g.PREV_CLOSE).values, "#22c55e", "#ef4444")
-    fig.add_trace(go.Bar(x=g.Date, y=g.DELIV_PER, marker_color=colors), row=2, col=1)
-    fig.add_hline(y=r.Deliv_Per_1M, line_dash="dash", line_color="#38bdf8", row=2, col=1)
-    fig.add_hline(y=r.Deliv_Per_3M, line_dash="dash", line_color="#94a3b8", row=2, col=1)
-    fig.add_trace(go.Bar(x=g.Date, y=g.DELIV_QTY, marker_color=colors), row=3, col=1)
-    fig.add_hline(y=r.Deliv_Qty_3M, line_dash="dash", line_color="#94a3b8", row=3, col=1)
-    fig.update_layout(height=760, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False,
-                      margin=dict(l=10, r=70, t=30, b=10))
-    st.plotly_chart(fig, width="stretch", key=f"{k}_price")
-    st.caption("Bar: green = close up, red = down. Blue dashed = last 1M avg, grey dashed = previous 2M avg. "
-               "Shaded band = 30D range.")
-
-    wf = E.weekly_flows(g, 12)
-    fig2 = go.Figure(go.Bar(x=[d.strftime("%d %b") for d, _ in wf], y=[f for _, f in wf],
-                            marker_color=["#22c55e" if f > 0 else "#ef4444" for _, f in wf]))
-    fig2.update_layout(height=280, template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10),
-                       title="Weekly net delivery buying - last 12 weeks (up-day − down-day delivery, shares)")
-    st.plotly_chart(fig2, width="stretch", key=f"{k}_wk")
-
-
-@st.dialog("Stock detail", width="large")
-def detail_dialog(sym: str):
-    render_detail(sym, "dlg")
-
-
-TABLE_COLS = ["Symbol", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3", "Score", "Signal",
-              "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage", "Deliv_Qty_X", "Today_X",
-              "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M", "Acc_Days", "Range_Pct",
-              "Chg_Pct", "Sector"]
-TABLE_CFG = {
-    "Symbol": st.column_config.TextColumn("Symbol", pinned=True),
-    "Price": st.column_config.NumberColumn("Price", format="₹%.2f"),
-    "Entry_Zone": st.column_config.TextColumn("Entry zone (₹)"),
-    "Entry_Status": st.column_config.TextColumn("Price vs zone"),
-    "SL": st.column_config.NumberColumn("SL", format="₹%.2f"),
-    "T1": st.column_config.NumberColumn("T1", format="₹%.2f"),
-    "T2": st.column_config.NumberColumn("T2", format="₹%.2f"),
-    "T3": st.column_config.NumberColumn("T3", format="₹%.2f"),
-    "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
-    "Fresh": st.column_config.TextColumn("Fresh activity"),
-    "Last5": st.column_config.TextColumn("Last 5 days", help="Purana → aaj. 🟢 strong delivery + price up, "
-                                         "🔴 strong delivery + price down, ⚪ normal"),
-    "Buy_Weeks": st.column_config.NumberColumn("Buy weeks /4", format="%d"),
-    "Deliv_Qty_X": st.column_config.NumberColumn("Deliv qty 1M÷3M", format="%.2fx"),
-    "Today_X": st.column_config.NumberColumn("Today deliv ÷ 3M avg", format="%.2fx"),
-    "Deliv_Per_Chg": st.column_config.NumberColumn("Deliv % Δ 1M−3M", format="%+.1f pp"),
-    "Net_Flow_1M": st.column_config.NumberColumn("Net buy flow 1M", format="%+.0f%%",
-                                                 help="(Up-day delivery − down-day delivery) ÷ total delivery"),
-    "Deliv_Per_1M": st.column_config.NumberColumn("Deliv % 1M", format="%.1f%%"),
-    "Deliv_Per_3M": st.column_config.NumberColumn("Deliv % prev 2M", format="%.1f%%"),
-    "Acc_Days": st.column_config.NumberColumn("Acc days /21", format="%d"),
-    "Range_Pct": st.column_config.NumberColumn("30D range", format="%.1f%%"),
-    "Chg_Pct": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
+IST = ZoneInfo("Asia/Kolkata")
+CACHE_DIR = os.path.join("data", "bhav")
+URLS = [
+    "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{d}.csv",
+    "https://archives.nseindia.com/products/content/sec_bhavdata_full_{d}.csv",
+]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/csv,*/*",
+    "Referer": "https://www.nseindia.com/",
 }
 
+# NSE symbols (no .NS). Edit freely or add more from the app sidebar.
+WATCHLIST = {
+    "Bank": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "INDUSINDBK"],
+    "PSU Bank": ["SBIN", "BANKBARODA", "PNB", "CANBK", "UNIONBANK"],
+    "Fin Services": ["BAJFINANCE", "BAJAJFINSV", "BAJAJHFL", "SBILIFE", "HDFCLIFE", "CHOLAFIN",
+                     "LICHSGFIN", "PNBHOUSING", "CANFINHOME"],
+    "IT": ["TCS", "INFY", "HCLTECH", "WIPRO", "TECHM", "LTIM"],
+    "Pharma": ["SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "LUPIN", "AUROPHARMA"],
+    "Auto": ["MARUTI", "M&M", "BAJAJ-AUTO", "EICHERMOT", "HEROMOTOCO", "TVSMOTOR"],
+    "FMCG": ["HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "DABUR", "GODREJCP"],
+    "Metal": ["TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "JINDALSTEL", "NMDC"],
+    "Energy": ["RELIANCE", "ONGC", "NTPC", "POWERGRID", "COALINDIA", "BPCL"],
+    "Realty": ["DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE", "LODHA"],
+    "Infra": ["LT", "ADANIPORTS", "SIEMENS", "ULTRACEMCO", "GRASIM"],
+    "Media": ["SUNTV", "PVRINOX", "ZEEL"],
+}
+SECTOR_OF = {s: sec for sec, lst in WATCHLIST.items() for s in lst}
 
-def stock_table(d: pd.DataFrame, name: str, height: int = 560):
-    """Table with row-click -> returns a newly clicked symbol (to open the detail popup)."""
-    view = d.copy()
-    view["Entry_Status"] = view.Entry_Status.map(ESTAT)
-    view["Buying_Status"] = view.Buying_Status.map(BICON)
-    view["Fresh"] = view.Fresh.map(FICON)
-    sig = hashlib.md5(",".join(view.Symbol).encode()).hexdigest()[:10]
-    ev = st.dataframe(view[TABLE_COLS], hide_index=True, width="stretch", height=height,
-                      column_config=TABLE_CFG, on_select="rerun", selection_mode="single-row",
-                      key=f"tbl_{name}_{sig}")
-    rows = ev.selection.rows
-    last_key = f"last_{name}"
-    if not rows:
-        st.session_state[last_key] = None
-        return None
-    sym = view.iloc[rows[0]].Symbol
-    if sym != st.session_state.get(last_key):
-        st.session_state[last_key] = sym
-        return sym
-    return None
+# ETFs / liquid & debt funds also trade in NSE "EQ" series - exclude them.
+# Add any leftover symbol here to hide it permanently.
+EXCLUDE = {"GOLDSHARE", "AXISGOLD", "SBIGOLD", "KOTAKGOLD", "TATAGOLD", "HDFCGOLD", "LICMFGOLD",
+           "SILVERIETF", "CPSEETF", "GOLD1", "GOLDCASE", "SILVER1"}
+_FUND_RE = re.compile(r"(BEES|ETF|LIQUID|GILT|NIFTY|SENSEX|NEXT50|MON100|MOM100|LOWVOL|QUAL30|"
+                      r"MOVALUE|MOSMALL|MAFANG|MOMENTUM|MID150|SMALL250|TOP100|OVERNIGHT)")
 
 
-tab1, tab2, tab3, tab4 = st.tabs(["🔎 Accumulation Screener", "🔄 Sector Rotation", "🎯 Stock Plan", "⚖️ Compare"])
-open_sym = None
+def is_fund(sym: str) -> bool:
+    return sym in EXCLUDE or bool(_FUND_RE.search(sym))
 
-# ---------------------------- Screener ------------------------------------ #
-with tab1:
-    QUICK = {
-        "strong": ("Strong accumulation", pool[pool.Signal == "Strong Accumulation"]),
-        "acc": ("Accumulation", pool[pool.Signal == "Accumulation"]),
-        "cont": ("Buying continuing", pool[pool.Buying_Status == "Continuing"]),
-        "fresh": ("Fresh activity", pool[pool.Fresh.isin(FRESH)].sort_values("Last5_X", ascending=False)),
-        "dist": ("Distribution", pool[pool.Signal == "Distribution"]),
-    }
-    if "quick" not in st.session_state:
-        st.session_state.quick = None
 
-    def set_quick(k):
-        st.session_state.quick = None if (k is None or st.session_state.quick == k) else k
+COLS = ["SYMBOL", "Date", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE",
+        "TTL_TRD_QNTY", "TURNOVER_LACS", "DELIV_QTY", "DELIV_PER"]
 
-    with st.container(key="kpis"):
-        kc = st.columns(6)
-        kc[0].button(f"Stocks scanned\n{len(pool)}", key="q_all", on_click=set_quick, args=(None,),
-                     type="primary" if st.session_state.quick is None else "secondary")
-        labels = {"strong": "🟢 Strong accumulation", "acc": "🟢 Accumulation", "cont": "🟢 Buying continuing",
-                  "fresh": "⚡ Fresh activity", "dist": "🔴 Distribution"}
-        for i, k in enumerate(QUICK, start=1):
-            extra = f"  (today {int((pool.Fresh == 'Spike today').sum())})" if k == "fresh" else ""
-            kc[i].button(f"{labels[k]}\n{len(QUICK[k][1])}{extra}", key=f"q_{k}", on_click=set_quick, args=(k,),
-                         type="primary" if st.session_state.quick == k else "secondary")
-    st.caption("👆 Card pe click karo - wahi stocks table me aa jayenge (jitna count likha hai utne). "
-               "Dobara click = filters pe wapas.")
 
-    q = st.multiselect("🔍 Search stock (type karte hi suggestions)", ALL_SYMS, placeholder="e.g. BAJ ... BAJAJHFL")
+def now_ist() -> dt.datetime:
+    return dt.datetime.now(IST)
 
-    PRESETS = {"Balanced (recommended)": (1.2, 3), "Strict (few, best)": (1.5, 6),
-               "Loose (more ideas)": (1.0, 0), "Custom": None}
-    p1, p2 = st.columns([1, 2])
-    preset = p1.selectbox("Scan preset", list(PRESETS), help=(
-        "Delivery qty × = pichle 1 mahine ki avg delivered qty ÷ usse pehle ke 2 mahine ki avg.\n"
-        "Delivery % rise = 1M avg delivery % − pichle 2M avg delivery % (pp).\n\n"
-        "Balanced = 1.2x aur +3pp. Strict = 1.5x aur +6pp. Loose = 1.0x, % shart nahi."))
-    if PRESETS[preset] is None:
-        s1, s2 = p2.columns(2)
-        min_x = s1.slider("Min delivery qty × (1M ÷ 3M)", 0.5, 4.0, 1.2, 0.1)
-        min_pp = s2.slider("Min delivery % rise (pp)", -10, 30, 3)
-    else:
-        min_x, min_pp = PRESETS[preset]
-        p2.info(f"1M delivered qty ≥ **{min_x}x** pichle 2M avg  |  1M delivery % ≥ **+{min_pp}pp**  "
-                "(best: Buying 'Continuing' + Setup 'In range' ya 'Breakout' + Stage Base/Early)")
 
-    h1, h2 = st.columns(2)
-    only_acc = h1.checkbox("Sirf Accumulation / Strong Accumulation dikhao", value=True)
-    hide_ext = h2.checkbox("Extended (already ran) chhupao", value=True)
-    f = st.columns(4)
-    sig = f[0].multiselect("Signal", SIGNALS, placeholder="All")
-    stg = f[1].multiselect("Stage (kitna chal chuka)", STAGES, placeholder="All",
-                           help="Base = 20D low se <5% upar. Early = 5–10%. Rally on = 10–18%. "
-                                "Extended = 18%+ ya 20 DMA se 10%+ upar.")
-    setup_sel = f[2].multiselect("Setup", SETUPS, placeholder="All",
-                                 help="In range = pichle 30 din ek range (≤25%) me. Breakout = range ke upar close.")
-    buy_sel = f[3].multiselect("Buying status", BUYS, placeholder="All",
-                               help="Pichle 4 hafte me kitne hafte net buying hui (up-day delivery > down-day delivery).")
-    g2 = st.columns(3)
-    sec_sel = g2[0].multiselect("Sector / Industry", sorted(pool.Sector.unique()), placeholder="All")
-    min_wk = g2[1].slider("Min buying weeks (last 4 me se)", 0, 4, 0)
-    fresh_sel = g2[2].multiselect(
-        "Fresh activity", FRESH_SEL, placeholder="All",
-        help="Kisi din achanak delivery qty 3M avg se 2x+ hui to yahan turant dikhega. "
-             "'All fresh' = teeno types (Spike today + Spike 3D + Building 5D) ek saath. "
-             "Ise chuno to Signal aur Scan preset ignore ho jaate hain.")
+# --------------------------------------------------------------------------- #
+# Download (parallel, cached per day on disk)
+# --------------------------------------------------------------------------- #
+def _parse(text: str) -> pd.DataFrame:
+    df = pd.read_csv(io.StringIO(text), skipinitialspace=True)
+    df.columns = [c.strip() for c in df.columns]
+    df = df[df["SERIES"].astype(str).str.strip() == "EQ"].copy()
+    df["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
+    df["Date"] = pd.to_datetime(df["DATE1"].astype(str).str.strip(), format="%d-%b-%Y")
+    for c in COLS[2:]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df[COLS]
 
-    fresh_picks = []
-    if fresh_sel:
-        fresh_picks = FRESH if "All fresh" in fresh_sel else [x for x in fresh_sel if x in FRESH]
-    has_fresh = bool(fresh_picks)
 
-    funnel = [("Universe", len(pool))]
-    quick = st.session_state.quick
-    if q:
-        d = scr[scr.Symbol.isin(q)]
-        funnel = [("Search", len(d))]
-    elif quick:
-        d = QUICK[quick][1]
-        st.success(f"Showing: **{QUICK[quick][0]}** - {len(d)} stocks (baaki filters ignore).")
-        funnel = []
-    else:
-        d = pool
-        if has_fresh:
-            d = d[d.Fresh.isin(fresh_picks)]
-            funnel.append(("Fresh activity", len(d)))
-        elif sig:
-            d = d[d.Signal.isin(sig)]
-            funnel.append(("Signal", len(d)))
-        elif only_acc:
-            d = d[d.Signal.isin(["Strong Accumulation", "Accumulation"])]
-            funnel.append(("Accumulation signal", len(d)))
-        if stg:
-            d = d[d.Stage.isin(stg)]
-            funnel.append(("Stage", len(d)))
-        elif hide_ext:
-            d = d[d.Stage != STAGES[3]]
-            funnel.append(("Extended hidden", len(d)))
-        if not has_fresh:
-            d = d[(d.Deliv_Qty_X >= min_x) & (d.Deliv_Per_Chg >= min_pp)]
-            funnel.append(("Scan preset", len(d)))
-        if setup_sel: d = d[d.Setup.isin(setup_sel)]
-        if buy_sel: d = d[d.Buying_Status.isin(buy_sel)]
-        if sec_sel: d = d[d.Sector.isin(sec_sel)]
-        d = d[d.Buy_Weeks >= min_wk]
-        funnel.append(("Setup/Buying/Sector/Weeks", len(d)))
-        if has_fresh:
-            d = d.sort_values("Last5_X", ascending=False)
-    st.caption(f"{len(d)} stocks | prices as of {asof:%d %b %Y}  |  👆 Row pe click karo → stock detail khulega")
-    if funnel:
-        st.caption("🔻 Filter funnel:  " + "  →  ".join(f"{n}: **{c}**" for n, c in funnel))
+def _get_day(day: dt.date):
+    """Returns (day, DataFrame|None, status)  status: ok | holiday | error"""
+    path = os.path.join(CACHE_DIR, f"{day:%Y%m%d}.csv")
+    miss = path + ".none"
+    if os.path.exists(path):
+        return day, pd.read_csv(path, parse_dates=["Date"]), "ok"
+    if os.path.exists(miss):
+        return day, None, "holiday"
+    stamp = f"{day:%d%m%Y}"
+    saw_404 = False
+    for url in URLS:
+        try:
+            r = requests.get(url.format(d=stamp), headers=HEADERS, timeout=25)
+            if r.status_code == 200 and len(r.text) > 5000:
+                df = _parse(r.text)
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                df.to_csv(path, index=False)
+                return day, df, "ok"
+            if r.status_code == 404:
+                saw_404 = True
+        except Exception:
+            continue
+    if saw_404:
+        if day < now_ist().date():  # old 404 = market holiday, remember it
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            open(miss, "w").close()
+        return day, None, "holiday"
+    return day, None, "error"
 
-    open_sym = stock_table(d, "scr") or open_sym
-    st.download_button("⬇️ Download CSV", d.to_csv(index=False).encode(), f"accumulation_{asof:%Y%m%d}.csv", "text/csv")
-    with st.expander("Score kaise banta hai? (1 month vs pichle 2 month)"):
-        st.markdown("""
-- **Delivered qty 1M ÷ pichle 2M avg**: ≥1.5x → 20, ≥1.2x → 14, ≥1.05x → 7
-- **Delivery % (1M avg − pichle 2M avg)**: ≥8pp → 15, ≥4pp → 10, >0 → 4
-- **Net buy flow 1M** (up-day delivery − down-day delivery ÷ total): ≥30% → 20, ≥15% → 14, >0 → 7
-- **Buying weeks** (last 4 hafte me kitne net-buy): 4 → 15, 3 → 11, 2 → 6
-- **Setup** In range (base) ya Breakout → 10
-- **Range hold** (price range ke neeche nahi toota) → 10
-- **Aaj ki delivered qty ≥ pichle 2M avg** → 10
 
-**Days + Weeks dono**: *Acc days /21* aur *Last 5 days* daily dikhate hain, *Buy weeks* weekly.
-**Fresh activity** achanak aaye spike pakadta hai: aaj ki delivered qty 3M avg se 2x+ (price up, delivery % +5pp)
-= Spike today; pichle 3 din me hua = Spike (last 3D); 5 din ki avg 1.5x+ aur net buying = Building.
-1M wala Signal slow hota hai, isliye achanak buying ke liye Fresh use karo.
+def fetch_history(sessions: int = 80):
+    today = now_ist().date()
+    days = [today - dt.timedelta(days=i) for i in range(0, 135)]
+    days = [d for d in days if d.weekday() < 5]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        res = list(ex.map(_get_day, days))
+    frames = [df for _, df, s in res if s == "ok" and df is not None]
+    errors = sum(1 for _, _, s in res if s == "error")
+    if not frames:
+        return pd.DataFrame(), {"days": 0, "errors": errors}
+    hist = pd.concat(frames, ignore_index=True)
+    keep = sorted(hist.Date.unique())[-sessions:]
+    hist = hist[hist.Date.isin(keep)].sort_values(["SYMBOL", "Date"]).reset_index(drop=True)
+    return hist, {"days": len(keep), "errors": errors}
 
-Smart money ek din me nahi kharidta - range ke andar hafton tak dheere dheere. Isliye daily nahi,
-**weekly net flow** dekha jata hai. Splits/bonus ke liye data auto-adjust hota hai, ETFs/liquid funds hata diye jate hain.""")
 
-# ------------------------- Sector rotation -------------------------------- #
-with tab2:
-    sec = E.sector_rotation(pool)
-    if sec.empty:
-        st.warning("Sector data nahi mila (NSE sector file load nahi hui ya universe chhota hai). "
-                   "Universe 'All liquid NSE stocks' rakho aur Refresh karo.")
-    else:
-        q_counts = sec.groupby("Quadrant").size().to_dict()
-        q_flow = sec.groupby("Quadrant").Flow_1M.mean().to_dict()
-        kc = st.columns(4)
-        for i, q in enumerate(["Leading", "Improving", "Weakening", "Lagging"]):
-            n = int(q_counts.get(q, 0))
-            fval = q_flow.get(q, 0.0)
-            cls = {"Leading": "g", "Improving": "g", "Weakening": "y", "Lagging": "r"}[q]
-            kpi(kc[i], f"{QICON[q]}", f"{n} sectors",
-                f"Avg flow {fval:+.1f}%" if n else "No sector", cls)
+# --------------------------------------------------------------------------- #
+# Corporate action adjustment (splits / bonus) - otherwise delivery qty jumps
+# --------------------------------------------------------------------------- #
+SECTOR_URLS = [
+    "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+    "https://nsearchives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv",
+]
+SECTOR_FILE = os.path.join("data", "sector_map.csv")
 
-        st.markdown("##### 🧭 Rotation map — Flow 1M (X) vs Flow change vs prev 2M (Y)")
-        st.caption("Right side = paisa abhi aa raha hai. Top side = pichle 2 mahine se sudhar. "
-                   "**Top-right (Leading)** = already strong. **Top-left (Improving)** = early entry zone. "
-                   "Bubble size = stocks in sector.")
 
-        xs = sec.Flow_1M.replace([np.inf, -np.inf], np.nan).dropna()
-        ys = sec.Flow_Chg.replace([np.inf, -np.inf], np.nan).dropna()
-        if xs.empty or ys.empty:
-            st.info("Sector flow data insufficient is universe me.")
+def fetch_sector_map() -> dict:
+    """Symbol -> NSE Industry (Nifty 500 + Microcap 250 = ~750 stocks). Cached 7 days on disk."""
+    try:
+        if os.path.exists(SECTOR_FILE) and (dt.datetime.now().timestamp() - os.path.getmtime(SECTOR_FILE)) < 7 * 86400:
+            m = pd.read_csv(SECTOR_FILE)
+            return dict(zip(m.Symbol, m.Industry))
+    except Exception:
+        pass
+    frames = []
+    for url in SECTOR_URLS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            if r.status_code == 200:
+                df = pd.read_csv(io.StringIO(r.text))
+                df.columns = [c.strip() for c in df.columns]
+                frames.append(df[["Symbol", "Industry"]])
+        except Exception:
+            continue
+    if frames:
+        m = pd.concat(frames).drop_duplicates("Symbol")
+        m["Symbol"] = m.Symbol.astype(str).str.strip()
+        os.makedirs("data", exist_ok=True)
+        m.to_csv(SECTOR_FILE, index=False)
+        return dict(zip(m.Symbol, m.Industry))
+    try:  # stale cache is better than nothing
+        m = pd.read_csv(SECTOR_FILE)
+        return dict(zip(m.Symbol, m.Industry))
+    except Exception:
+        return {}
+
+
+PRICE_COLS = ["PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE"]
+QTY_COLS = ["TTL_TRD_QNTY", "DELIV_QTY"]
+
+
+def session_pos(hist: pd.DataFrame) -> pd.Series:
+    idx = pd.DatetimeIndex(sorted(hist.Date.unique()))
+    return pd.Series(range(len(idx)), index=idx)
+
+
+def adjust_splits(g: pd.DataFrame, pos: pd.Series) -> pd.DataFrame:
+    """NSE's PREV_CLOSE is already adjusted on ex-date. A big gap between PREV_CLOSE and the
+    previous row's CLOSE (on consecutive sessions) = split/bonus -> back-adjust history."""
+    g = g.copy()
+    f = g.PREV_CLOSE / g.CLOSE_PRICE.shift(1)
+    consec = g.Date.map(pos).diff() == 1
+    ev = consec & ((f < 0.9) | (f > 1.1))
+    if not ev.any():
+        return g
+    factor = pd.Series(1.0, index=g.index)
+    factor[ev] = f[ev]
+    rev = factor.shift(-1).fillna(1.0)[::-1].cumprod()[::-1]
+    for c in PRICE_COLS:
+        g[c] = g[c] * rev
+    for c in QTY_COLS:
+        g[c] = g[c] / rev
+    return g
+
+
+def symbol_view(hist: pd.DataFrame, sym: str) -> pd.DataFrame:
+    g = hist[hist.SYMBOL == sym].sort_values("Date")
+    return adjust_splits(g, session_pos(hist))
+
+
+# --------------------------------------------------------------------------- #
+# Delivery flow helpers
+# --------------------------------------------------------------------------- #
+RECENT, BASE = 21, 42      # last 1 month vs the 2 months before it (3 months total)
+
+
+def _flow(df: pd.DataFrame) -> float:
+    """Net delivered qty: delivery on up-days minus delivery on down-days."""
+    up, dn = df.CLOSE_PRICE > df.PREV_CLOSE, df.CLOSE_PRICE < df.PREV_CLOSE
+    return float(df.DELIV_QTY[up].sum() - df.DELIV_QTY[dn].sum())
+
+
+def weekly_flows(g: pd.DataFrame, weeks: int = 12) -> list[tuple]:
+    out, n = [], len(g)
+    for k in range(weeks - 1, -1, -1):
+        seg = g.iloc[max(0, n - 5 * (k + 1)): n - 5 * k]
+        if len(seg):
+            out.append((seg.Date.iloc[-1], _flow(seg)))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Trade plan: range / base based (smart-money style), ATR fallback
+# --------------------------------------------------------------------------- #
+def _atr(g: pd.DataFrame) -> float:
+    c, h, l = g.CLOSE_PRICE, g.HIGH_PRICE, g.LOW_PRICE
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    return float(tr.tail(14).mean())
+
+
+def _finish(lo, hi, sl, t1, t2, t3, status, extra=None):
+    entry = (lo + hi) / 2
+    risk = entry - sl
+    if risk / entry > 0.10:                      # cap very wide stops at 10%
+        sl, risk = entry * 0.90, entry * 0.10
+        status += " | SL capped at 10%"
+    t1 = max(t1, entry + 1.0 * risk)
+    t2 = max(t2, entry + 2.0 * risk, t1 * 1.005)
+    t3 = max(t3, entry + 3.5 * risk, t2 * 1.005)
+    out = {"Entry_Low": round(lo, 2), "Entry_High": round(hi, 2), "Entry": round(entry, 2),
+           "SL": round(sl, 2), "Risk_Pct": round(risk / entry * 100, 2),
+           "T1": round(t1, 2), "T2": round(t2, 2), "T3": round(t3, 2), "Plan_Status": status}
+    out.update(extra or {})
+    return out
+
+
+def _ret(c: pd.Series, n: int) -> float:
+    return round(float((c.iloc[-1] / c.iloc[-1 - n] - 1) * 100), 1) if len(c) > n else float("nan")
+
+
+def make_plan(g, setup, hi_c, lo_c, lo_low) -> dict:
+    atr = _atr(g)
+    close = float(g.CLOSE_PRICE.iloc[-1])
+    dma20 = float(g.CLOSE_PRICE.tail(20).mean())
+    h = hi_c - lo_c
+    extra = {"ATR": round(atr, 2)}
+
+    if setup == "In range (base)" and h > 0:
+        p = (close - lo_c) / h
+        if p <= 0.6:
+            lo, hi = max(lo_c, close - 0.5 * atr), close
+            status = "Buy within range (near support)"
         else:
-            pad_x = max(abs(xs.min()), abs(xs.max())) * 1.15 + 5
-            pad_y = max(abs(ys.min()), abs(ys.max())) * 1.15 + 3
-            x0, x1 = -pad_x, pad_x
-            y0, y1 = -pad_y, pad_y
+            lo, hi = lo_c + 0.3 * h, lo_c + 0.5 * h
+            status = f"Near range top - buy dip, or breakout above Rs {hi_c * 1.005:.2f}"
+        sl = lo_low - 0.25 * atr
+        return _finish(lo, hi, sl, hi_c, hi_c + 0.5 * h, hi_c + 1.0 * h, status, extra)
 
-            fig = go.Figure()
-            for xA, xB, yA, yB, col, label in [
-                (0, x1, 0, y1, "#22c55e", "LEADING"),
-                (x0, 0, 0, y1, "#3b82f6", "IMPROVING"),
-                (0, x1, y0, 0, "#f59e0b", "WEAKENING"),
-                (x0, 0, y0, 0, "#ef4444", "LAGGING"),
-            ]:
-                fig.add_shape(type="rect", x0=xA, x1=xB, y0=yA, y1=yB,
-                              fillcolor=col, opacity=0.055, line_width=0, layer="below")
-                fig.add_annotation(x=(xA + xB) / 2, y=yB * 0.92,
-                                   text=label, showarrow=False,
-                                   font=dict(size=11, color=col), opacity=0.6)
+    if setup == "Breakout" and h > 0:
+        if close > hi_c * 1.05:
+            lo, hi = hi_c, hi_c + 0.5 * atr
+            status = f"Extended after breakout - wait for retest of Rs {hi_c:.2f}"
+        else:
+            lo, hi = hi_c, max(close, hi_c + 0.1 * atr)
+            status = f"Fresh breakout - buy near/after retest of Rs {hi_c:.2f}"
+        sl = max(hi_c - 1.2 * atr, lo_low)
+        return _finish(lo, hi, sl, hi_c + 0.5 * h, hi_c + 1.0 * h, hi_c + 1.5 * h, status, extra)
 
-            for qn, col in QCOL.items():
-                s = sec[sec.Quadrant == qn]
-                if s.empty:
-                    continue
-                fig.add_trace(go.Scatter(
-                    x=s.Flow_1M, y=s.Flow_Chg, mode="markers+text",
-                    text=s.Sector, textposition="top center",
-                    textfont=dict(size=10),
-                    name=QICON[qn],
-                    marker=dict(size=np.clip(s.Stocks * 1.2 + 12, 14, 44),
-                                color=col, opacity=0.85,
-                                line=dict(color="#0f172a", width=1.5)),
-                    customdata=np.stack([s.Acc_Pct, s.Stocks, s.Fresh,
-                                         s.Deliv_Qty_X, s.Ret_1M], axis=1),
-                    hovertemplate=("<b>%{text}</b><br>"
-                                   "Flow 1M: %{x:+.1f}%<br>"
-                                   "Change vs prev 2M: %{y:+.1f} pp<br>"
-                                   "Accumulating: %{customdata[0]}%% of %{customdata[1]}<br>"
-                                   "Fresh: %{customdata[2]}<br>"
-                                   "Deliv qty 1M÷3M: %{customdata[3]:.2f}x<br>"
-                                   "Ret 1M: %{customdata[4]:+.1f}%<extra></extra>"))
-            fig.add_vline(x=0, line_color="#475569", line_width=1)
-            fig.add_hline(y=0, line_color="#475569", line_width=1)
-            fig.update_layout(
-                height=560, template="plotly_dark",
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis=dict(title="Net buy flow 1M (avg %, up-day − down-day delivery)",
-                           range=[x0, x1], zeroline=False, gridcolor="#1e293b"),
-                yaxis=dict(title="Change vs previous 2M (pp)",
-                           range=[y0, y1], zeroline=False, gridcolor="#1e293b"),
-                legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
-                hoverlabel=dict(bgcolor="#0f172a", bordercolor="#334155"))
-            st.plotly_chart(fig, width="stretch", key="sec_chart")
+    # fallback: plain ATR plan
+    swing = float(g.LOW_PRICE.tail(10).min())
+    if close > dma20 * 1.06:
+        lo, hi, status = dma20, dma20 + 0.5 * atr, "No clear range, extended - wait for pullback to 20 DMA"
+    else:
+        lo, hi, status = close - 0.5 * atr, close, "No clear range - ATR plan"
+    entry = (lo + hi) / 2
+    sl = min(swing, entry - 1.5 * atr)
+    risk = entry - sl
+    return _finish(lo, hi, sl, entry + 1.5 * risk, entry + 2.5 * risk, entry + 4.0 * risk, status, extra)
 
-        c1, c2 = st.columns(2)
-        top = sec.sort_values("Flow_Chg", ascending=False).head(5)[
-            ["Sector", "Quadrant", "Flow_1M", "Flow_Chg", "Acc_Pct", "Stocks"]]
-        bot = sec.sort_values("Flow_Chg").head(5)[
-            ["Sector", "Quadrant", "Flow_1M", "Flow_Chg", "Acc_Pct", "Stocks"]]
-        with c1:
-            st.markdown("###### 🚀 Fastest-improving (rotation coming IN)")
-            st.dataframe(top, hide_index=True, width="stretch",
-                         column_config={
-                             "Flow_1M": st.column_config.NumberColumn(format="%+.1f%%"),
-                             "Flow_Chg": st.column_config.NumberColumn(format="%+.1f pp"),
-                             "Acc_Pct": st.column_config.ProgressColumn(
-                                 min_value=0, max_value=100, format="%d%%"),
-                         })
-        with c2:
-            st.markdown("###### 🧊 Fastest-weakening (rotation going OUT)")
-            st.dataframe(bot, hide_index=True, width="stretch",
-                         column_config={
-                             "Flow_1M": st.column_config.NumberColumn(format="%+.1f%%"),
-                             "Flow_Chg": st.column_config.NumberColumn(format="%+.1f pp"),
-                             "Acc_Pct": st.column_config.ProgressColumn(
-                                 min_value=0, max_value=100, format="%d%%"),
-                         })
 
-        st.markdown("###### 📋 All sectors — click row to drill into stocks")
-        sv = sec.copy()
-        sv["Quadrant"] = sv.Quadrant.map(QICON)
-        sv = sv.sort_values("Flow_Chg", ascending=False)
-        ev = st.dataframe(
-            sv, hide_index=True, width="stretch", height=min(560, 40 + 35 * len(sv)),
-            on_select="rerun", selection_mode="single-row", key="sec_tbl",
-            column_config={
-                "Sector": st.column_config.TextColumn("Sector", pinned=True, width="medium"),
-                "Quadrant": st.column_config.TextColumn("State", width="small"),
-                "Acc_Pct": st.column_config.ProgressColumn(
-                    "Accumulating %", min_value=0, max_value=100, format="%d%%", width="small"),
-                "Stocks": st.column_config.NumberColumn("Stocks", format="%d", width="small"),
-                "Accumulating": st.column_config.NumberColumn("Accum.", format="%d", width="small"),
-                "Strong": st.column_config.NumberColumn("Strong", format="%d", width="small"),
-                "Continuing": st.column_config.NumberColumn("Buying cont.", format="%d", width="small"),
-                "Fresh": st.column_config.NumberColumn("⚡ Fresh", format="%d", width="small"),
-                "Flow_1M": st.column_config.NumberColumn("Flow 1M", format="%+.1f%%"),
-                "Flow_Prev": st.column_config.NumberColumn("Flow prev 2M", format="%+.1f%%"),
-                "Flow_Chg": st.column_config.NumberColumn("Flow Δ", format="%+.1f pp"),
-                "Deliv_Qty_X": st.column_config.NumberColumn("Deliv 1M÷3M", format="%.2fx"),
-                "Ret_1W": st.column_config.NumberColumn("Ret 1W", format="%+.1f%%"),
-                "Ret_1M": st.column_config.NumberColumn("Ret 1M", format="%+.1f%%"),
-                "Ret_3M": st.column_config.NumberColumn("Ret 3M", format="%+.1f%%"),
-            })
+# --------------------------------------------------------------------------- #
+# Screener: last 1 month vs previous 2 months
+# --------------------------------------------------------------------------- #
+def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: float = 0.0,
+                     sector_map: dict | None = None) -> pd.DataFrame:
+    sectors = sector_map or {}
+    pos = session_pos(hist)
+    watch = set(SECTOR_OF) | set(extra)
+    rows = []
+    for sym, g in hist.groupby("SYMBOL", sort=False):
+        if len(g) < RECENT + BASE or is_fund(sym):
+            continue
+        g = adjust_splits(g.sort_values("Date"), pos)
+        c = g.CLOSE_PRICE
+        r = c.pct_change()
+        if r.tail(63).abs().max() > 0.30:        # unadjusted corporate action / bad data
+            continue
+        if r.tail(60).std() * 100 < 0.4:         # liquid / debt funds
+            continue
+        t = g.iloc[-1]
+        if pd.isna(t.DELIV_QTY) or pd.isna(t.DELIV_PER):
+            continue
+        rec, base = g.iloc[-RECENT:], g.iloc[-(RECENT + BASE):-RECENT]
+        turn_cr = g.TURNOVER_LACS.tail(63).mean() / 100
+        if turn_cr < min_turnover_cr and sym not in watch:
+            continue
+        dq_1m, dq_3m = rec.DELIV_QTY.mean(), base.DELIV_QTY.mean()
+        dp_1m, dp_3m = rec.DELIV_PER.mean(), base.DELIV_PER.mean()
+        vol_b = base.TTL_TRD_QNTY.mean()
+        if not (dq_3m > 0 and vol_b > 0) or pd.isna(dp_1m) or pd.isna(dp_3m):
+            continue
+        qty_x, pp = dq_1m / dq_3m, dp_1m - dp_3m
+        today_x = t.DELIV_QTY / dq_3m
+        vol_x = rec.TTL_TRD_QNTY.mean() / vol_b
 
-        if ev.selection.rows:
-            chosen = sv.iloc[ev.selection.rows[0]].Sector
-            sd = pool[pool.Sector == chosen].sort_values(["Score", "Deliv_Qty_X"], ascending=False)
-            st.markdown(f"#### {chosen} — {len(sd)} stocks (score desc)")
-            open_sym = stock_table(sd, "sec", height=420) or open_sym
+        # --- fresh activity: catches a sudden accumulation day immediately (1M avg is slow) ---
+        last5 = g.iloc[-5:]
+        x5 = (last5.DELIV_QTY / dq_3m).values
+        up5 = (last5.CLOSE_PRICE >= last5.PREV_CLOSE).values
+        last5_x = float(last5.DELIV_QTY.mean() / dq_3m)
+        pattern = "".join("🟢" if (x >= 1.2 and u) else "🔴" if x >= 1.2 else "⚪" for x, u in zip(x5, up5))
+        if today_x >= 2 and up5[-1] and t.DELIV_PER >= dp_3m + 5:
+            fresh = "Spike today"
+        elif any(x5[i] >= 2 and up5[i] for i in (-4, -3, -2)):
+            fresh = "Spike (last 3D)"
+        elif last5_x >= 1.5 and _flow(last5) > 0:
+            fresh = "Building (5D)"
+        else:
+            fresh = "None"
 
-        st.caption("Returns = sector ke stocks ka median. Flow = sector stocks ka average net buy flow. "
-                   "Quadrant: Leading = flow + aur badh raha | Improving = flow abhi - par sudhar raha (early) | "
-                   "Weakening = flow + par ghat raha | Lagging = flow - aur bigad raha.")
+        flow_1m = _flow(rec) / max(rec.DELIV_QTY.sum(), 1)
+        flow_3m = _flow(base) / max(base.DELIV_QTY.sum(), 1)
+        flows = [f for _, f in weekly_flows(g, 4)]
+        buy_weeks = int(sum(f > 0 for f in flows))
+        last_wk = bool(flows and flows[-1] > 0)
+        if buy_weeks >= 3 and last_wk:
+            bstat = "Continuing"
+        elif last_wk:
+            bstat = "Just started"
+        elif buy_weeks >= 2:
+            bstat = "Fading"
+        else:
+            bstat = "Not buying"
 
-        # ---------- Data verification ----------
-        with st.expander("🔍 Verify sector data (accuracy check)"):
-            sm = E.fetch_sector_map()
-            st.write(f"**Sector map rows:** {len(sm)}")
-            if not sm.empty:
-                st.dataframe(sm.head(10), hide_index=True, use_container_width=True)
+        strong = (rec.DELIV_QTY > dq_3m) & (rec.DELIV_PER > dp_3m)
+        acc_days = int((strong & (rec.CLOSE_PRICE >= rec.PREV_CLOSE)).sum())
+        dist_days = int((strong & (rec.CLOSE_PRICE < rec.PREV_CLOSE)).sum())
 
-            missing = pool[~pool.Symbol.isin(sm.Symbol)] if not sm.empty else pool
-            if not missing.empty:
-                st.warning(f"⚠️ {len(missing)} stocks ka sector mapping missing hai "
-                           f"(sector 'Unknown' me daale gaye): {', '.join(missing.Symbol.head(15).tolist())}")
-            else:
-                st.success("✅ Saare stocks ka sector mapped hai.")
+        # range / base (last 30 sessions before today)
+        rng = g.iloc[-31:-1]
+        hi_c, lo_c, lo_low = rng.CLOSE_PRICE.max(), rng.CLOSE_PRICE.min(), rng.LOW_PRICE.min()
+        range_pct = (hi_c / lo_c - 1) * 100
+        close = float(t.CLOSE_PRICE)
+        if close > hi_c:
+            setup = "Breakout"
+        elif close < lo_c * 0.99:
+            setup = "Breakdown"
+        elif range_pct <= 25:
+            setup = "In range (base)"
+        else:
+            setup = "Trending / wide"
 
-            st.write("**Raw sector rotation output:**")
-            st.dataframe(sec, hide_index=True, use_container_width=True)
+        dma20 = c.tail(20).mean()
+        run20 = (close / c.tail(20).min() - 1) * 100
+        from_hi = (close / c.tail(60).max() - 1) * 100
+        if run20 >= 18 or close > dma20 * 1.10:
+            stage = "Extended (already ran)"
+        elif run20 >= 10:
+            stage = "Rally on"
+        elif run20 >= 5:
+            stage = "Early move"
+        else:
+            stage = "Base (not moved)"
 
-            st.write("**Sanity checks:**")
-            issues = []
-            if (sec.Flow_1M.abs() > 100).any():
-                issues.append("Flow_1M me ±100% se bahar values — Net_Flow calculation check karo.")
-            if (sec.Flow_Prev.abs() > 100).any():
-                issues.append("Flow_Prev me ±100% se bahar values — Net_Flow calculation check karo.")
-            if (sec.Stocks < 3).any():
-                issues.append(f"{int((sec.Stocks<3).sum())} sectors me 3 se kam stocks — average noisy hoga.")
-            if sec.Quadrant.isna().any():
-                issues.append("Kuch sectors me Quadrant blank hai.")
-            if issues:
-                for i in issues:
-                    st.warning(i)
-            else:
-                st.success("✅ Sab sanity checks pass.")
+        s = 0
+        s += 20 if qty_x >= 1.5 else 14 if qty_x >= 1.2 else 7 if qty_x >= 1.05 else 0
+        s += 15 if pp >= 8 else 10 if pp >= 4 else 4 if pp > 0 else 0
+        s += 20 if flow_1m >= 0.3 else 14 if flow_1m >= 0.15 else 7 if flow_1m > 0 else 0
+        s += 15 if buy_weeks == 4 else 11 if buy_weeks == 3 else 6 if buy_weeks == 2 else 0
+        s += 10 if setup in ("In range (base)", "Breakout") else 0
+        s += 10 if close >= lo_c * 0.99 else 0
+        s += 10 if today_x >= 1 else 0
+        signal = "Strong Accumulation" if s >= 75 else "Accumulation" if s >= 55 else "Neutral"
+        if s < 55 and (dist_days > acc_days or flow_1m < -0.1):
+            signal = "Distribution"
+        if vol_x < 0.5 and signal != "Distribution":
+            signal = "Low volume (ignore)"
 
-# ---------------------------- Stock plan ---------------------------------- #
-with tab3:
-    idx = ALL_SYMS.index("BAJAJHFL") if "BAJAJHFL" in ALL_SYMS else 0
-    sym = st.selectbox("Stock (type karke search)", ALL_SYMS, index=idx)
-    render_detail(sym, "tab")
+        plan = make_plan(g, setup, hi_c, lo_c, lo_low)
+        if close > plan["Entry_High"] * 1.003:
+            est = "Above zone (wait)"
+        elif close < plan["Entry_Low"] * 0.997:
+            est = "Below zone"
+        else:
+            est = "In zone"
+        rows.append({
+            "Symbol": sym, "Sector": sectors.get(sym) or SECTOR_OF.get(sym) or "Other", "Price": round(close, 2),
+            "Chg_Pct": round(float((close / t.PREV_CLOSE - 1) * 100), 2),
+            "Ret_1W": _ret(c, 5), "Ret_1M": _ret(c, 21), "Ret_3M": _ret(c, 62),
+            "Deliv_Per": round(float(t.DELIV_PER), 1), "Deliv_Per_1M": round(float(dp_1m), 1),
+            "Deliv_Per_3M": round(float(dp_3m), 1), "Deliv_Per_Chg": round(float(pp), 1),
+            "Deliv_Qty": int(t.DELIV_QTY), "Deliv_Qty_1M": int(dq_1m), "Deliv_Qty_3M": int(dq_3m),
+            "Deliv_Qty_X": round(float(qty_x), 2), "Today_X": round(float(today_x), 2),
+            "Last5_X": round(last5_x, 2), "Fresh": fresh, "Last5": pattern,
+            "Vol_X": round(float(vol_x), 2),
+            "Net_Flow_1M": round(float(flow_1m) * 100, 0), "Net_Flow_3M": round(float(flow_3m) * 100, 0),
+            "Buy_Weeks": buy_weeks, "Buying_Status": bstat,
+            "Acc_Days": acc_days, "Dist_Days": dist_days,
+            "Setup": setup, "Range_Pct": round(float(range_pct), 1),
+            "Range_Hi": round(float(hi_c), 2), "Range_Lo": round(float(lo_c), 2),
+            "Run_20D": round(float(run20), 1), "From_60D_High": round(float(from_hi), 1), "Stage": stage,
+            "Avg_Turnover_Cr": round(float(turn_cr), 1), "Score": int(s), "Signal": signal,
+            "Entry_Status": est, "Entry_Gap": round((close / plan["Entry"] - 1) * 100, 2),
+            "Entry_Zone": f"{plan['Entry_Low']:.2f} - {plan['Entry_High']:.2f}", **plan,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return df.sort_values(["Score", "Deliv_Qty_X"], ascending=False).reset_index(drop=True)
 
-# ----------------------------- Compare ------------------------------------ #
-with tab4:
-    pick = st.multiselect("Select up to 4 stocks (type karke search)", ALL_SYMS,
-                          default=[s for s in ["BAJAJHFL", "BAJFINANCE"] if s in ALL_SYMS], max_selections=4)
-    if pick:
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07,
-                            subplot_titles=("Delivery % (5-day smoothed)", "Cumulative net delivery flow (shares)",
-                                            "Price rebased to 100"))
-        for s in pick:
-            gs = E.symbol_view(hist, s).tail(80)
-            up, dn = gs.CLOSE_PRICE > gs.PREV_CLOSE, gs.CLOSE_PRICE < gs.PREV_CLOSE
-            net = (gs.DELIV_QTY.where(up, 0) - gs.DELIV_QTY.where(dn, 0)).cumsum()
-            fig.add_trace(go.Scatter(x=gs.Date, y=gs.DELIV_PER.rolling(5).mean(), name=s), row=1, col=1)
-            fig.add_trace(go.Scatter(x=gs.Date, y=net, name=s, showlegend=False), row=2, col=1)
-            fig.add_trace(go.Scatter(x=gs.Date, y=gs.CLOSE_PRICE / gs.CLOSE_PRICE.iloc[0] * 100, name=s,
-                                     showlegend=False), row=3, col=1)
-        fig.update_layout(height=820, template="plotly_dark", hovermode="x unified",
-                          margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(fig, width="stretch", key="cmp_chart")
-        cmp = scr[scr.Symbol.isin(pick)][["Symbol", "Price", "Entry_Zone", "SL", "T1", "T2", "T3", "Score", "Signal",
-                                          "Buying_Status", "Buy_Weeks", "Setup", "Stage", "Deliv_Qty_X",
-                                          "Deliv_Per_Chg", "Net_Flow_1M", "Net_Flow_3M"]]
-        st.dataframe(cmp, hide_index=True, width="stretch")
 
-# row click anywhere -> popup with full stock detail (only one dialog per run)
-if open_sym:
-    detail_dialog(open_sym)
+# --------------------------------------------------------------------------- #
+# Sector rotation (delivery-flow based): where is money coming in / shifting?
+# --------------------------------------------------------------------------- #
+FRESH_SET = ("Spike today", "Spike (last 3D)", "Building (5D)")
+
+
+def sector_rotation(scr: pd.DataFrame, min_stocks: int = 3) -> pd.DataFrame:
+    d = scr[~scr.Sector.isin(["Other", "-"])]
+    rows = []
+    for sec, g in d.groupby("Sector"):
+        n = len(g)
+        if n < min_stocks:
+            continue
+        acc = int(g.Signal.isin(["Strong Accumulation", "Accumulation"]).sum())
+        f1, f0 = float(g.Net_Flow_1M.mean()), float(g.Net_Flow_3M.mean())
+        chg = f1 - f0
+        quad = ("Leading" if f1 > 0 and chg > 0 else "Weakening" if f1 > 0 else
+                "Improving" if chg > 0 else "Lagging")
+        rows.append({
+            "Sector": sec, "Stocks": n, "Accumulating": acc, "Acc_Pct": round(acc / n * 100),
+            "Strong": int((g.Signal == "Strong Accumulation").sum()),
+            "Continuing": int((g.Buying_Status == "Continuing").sum()),
+            "Fresh": int(g.Fresh.isin(FRESH_SET).sum()),
+            "Flow_1M": round(f1, 1), "Flow_Prev": round(f0, 1), "Flow_Chg": round(chg, 1),
+            "Deliv_Qty_X": round(float(g.Deliv_Qty_X.median()), 2),
+            "Ret_1W": round(float(g.Ret_1W.median()), 1), "Ret_1M": round(float(g.Ret_1M.median()), 1),
+            "Ret_3M": round(float(g.Ret_3M.median()), 1), "Quadrant": quad,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    return df.sort_values(["Acc_Pct", "Flow_1M"], ascending=False).reset_index(drop=True)
