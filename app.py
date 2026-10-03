@@ -296,7 +296,8 @@ def validate_radar(df: pd.DataFrame) -> list[str]:
     return issues
 
 
-def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> pd.DataFrame:
+def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
+                    stale_pct: float = STALE_DEVIATION_PCT) -> pd.DataFrame:
     out = []
     for r in radar.to_dict("records"):
         sym = r["symbol"]
@@ -316,6 +317,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> 
         t3_pct = (r["t3"] / entry_ref - 1) * 100
         rr_t1 = (r["t1"] - entry_ref) / risk if risk > 0 else np.nan
 
+        dev_pct = (cmp_ / r["snap_cmp"] - 1) * 100 if cmp_ is not None else None
         day_pct = None
         if q and q.get("prev_close"):
             day_pct = (cmp_ / q["prev_close"] - 1) * 100
@@ -327,7 +329,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> 
             key, status, action = "BLOCKED", "⛔ BLOCKED – Delivery/Spurt", "NO TRADE (Pillar 2)"
         elif cmp_ is None or last_close is None:
             key, status, action = "NODATA", "📴 NO LIVE DATA", "WAIT – FEED UNAVAILABLE"
-        elif abs(cmp_ / r["snap_cmp"] - 1) * 100 > STALE_DEVIATION_PCT:
+        elif abs(cmp_ / r["snap_cmp"] - 1) * 100 > stale_pct:
             key, status, action = "STALE", "⚠️ LEVELS STALE", "REFRESH RADAR LEVELS / CHECK TICKER"
         elif last_close < r["support"]:
             key, status, action = "INVALID", "❌ INVALIDATED", "AVOID – STRUCTURE BROKEN"
@@ -362,6 +364,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> 
             "T1 %": t1_pct, "T2 %": t2_pct, "T3 %": t3_pct, "R:R (T1)": rr_t1,
             "Volume Spurt (x)": r["spurt"], "Delivery %": r["deliv"], "Radar Age (Days)": r["age_days"],
             "Catalyst Remark": r["remark"],
+            "Radar Snapshot CMP (Rs)": r["snap_cmp"], "Live vs Snapshot %": dev_pct,
             "_key": key, "_rank": RANK[key], "_tradable": tradable,
         })
     df = pd.DataFrame(out)
@@ -445,15 +448,91 @@ def generate_excel_export(df: pd.DataFrame, meta: dict) -> bytes:
 # ==========================================================
 # TRADE BOOK (persistence + exit rules)
 # ==========================================================
-def load_trades() -> list[dict]:
-    if os.path.exists(TRADE_BOOK_PATH):
+def _num(raw: dict, *keys: str) -> float | None:
+    for k in keys:
+        v = raw.get(k)
         try:
-            with open(TRADE_BOOK_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, list) else []
-        except Exception:
-            return []
-    return []
+            if v is not None and v != "":
+                return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def normalize_trade(raw, levels: dict) -> tuple[dict | None, str | None]:
+    """
+    Converts any stored trade (old/new schema) into the current schema.
+    Returns (trade, note). trade=None means it could not be repaired safely.
+    """
+    if not isinstance(raw, dict):
+        return None, "entry is not an object"
+    sym = str(raw.get("symbol") or raw.get("Symbol") or "").strip().upper()
+    lv = levels.get(sym, {})
+    entry = _num(raw, "entry_price", "entry", "Entry", "price", "buy_price")
+    if not sym or entry is None or entry <= 0:
+        return None, f"{sym or '?'}: symbol/entry price missing"
+
+    note = None
+    qty = _num(raw, "qty", "quantity", "Qty")
+    if qty is None or qty < 1:
+        qty, note = 1, f"{sym}: quantity missing, set to 1 (log it again with the right qty)"
+
+    sl = _num(raw, "initial_sl", "stop_loss", "sl", "stoploss")
+    if sl is None:
+        sl = lv.get("support")
+    t1 = _num(raw, "t1", "target1", "Target 1") or lv.get("t1")
+    t2 = _num(raw, "t2", "target2", "Target 2") or lv.get("t2")
+    t3 = _num(raw, "t3", "target3", "Target 3") or lv.get("t3")
+    if sl is None or sl >= entry or not (t1 and t2 and t3):
+        return None, f"{sym}: stop-loss/targets missing or invalid"
+
+    status = str(raw.get("status", "OPEN")).upper()
+    exit_px = _num(raw, "exit_price")
+    if status != "CLOSED" or exit_px is None:
+        status, exit_px = "OPEN", None
+
+    return {
+        "id": str(raw.get("id") or uuid.uuid4().hex[:8]), "symbol": sym,
+        "entry_price": entry, "qty": int(qty), "initial_sl": float(sl),
+        "t1": float(t1), "t2": float(t2), "t3": float(t3),
+        "t1_hit": bool(raw.get("t1_hit", False)), "t2_hit": bool(raw.get("t2_hit", False)),
+        "entry_date": str(raw.get("entry_date") or "n/a"),
+        "status": status, "exit_price": exit_px, "exit_date": raw.get("exit_date"),
+    }, note
+
+
+def load_trades(levels: dict) -> tuple[list[dict], list[str]]:
+    """Loads + repairs the trade book. Unrepairable rows are skipped, original file is backed up."""
+    if not os.path.exists(TRADE_BOOK_PATH):
+        return [], []
+    try:
+        with open(TRADE_BOOK_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return [], ["Trade file unreadable (corrupt JSON) - starting empty."]
+    if not isinstance(data, list):
+        return [], ["Trade file has unexpected format - starting empty."]
+
+    trades, problems, seen = [], [], set()
+    for raw in data:
+        t, note = normalize_trade(raw, levels)
+        if note:
+            problems.append(note)
+        if t is None:
+            continue
+        while t["id"] in seen:
+            t["id"] = uuid.uuid4().hex[:8]
+        seen.add(t["id"])
+        trades.append(t)
+    if problems:
+        try:
+            bak = TRADE_BOOK_PATH + ".legacy.bak"
+            if not os.path.exists(bak):
+                with open(bak, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+        except OSError:
+            pass
+    return trades, problems
 
 
 def save_trades(trades: list[dict]) -> bool:
@@ -551,9 +630,11 @@ def render_trade_book(radar: pd.DataFrame, quotes: dict) -> None:
         with st.form("tb_close_form"):
             labels = {f"{t['symbol']} | {t['qty']} @ {t['entry_price']:.2f} | {t['id']}": t["id"] for t in open_trades}
             pick = st.selectbox("Close position", list(labels.keys()))
-            exit_px = st.number_input("Exit price (Rs)", min_value=0.01, value=1.0, step=0.05)
+            exit_px = st.number_input("Exit price (Rs)", min_value=0.01, value=None, step=0.05, placeholder="Enter exit price")
             close = st.form_submit_button("Close position", **STRETCH)
-        if close:
+        if close and exit_px is None:
+            st.error("Enter the exit price first.")
+        elif close:
             tid = labels[pick]
             for t in trades:
                 if t["id"] == tid:
@@ -622,8 +703,12 @@ def main() -> None:
     if not auth_gate():
         st.stop()
 
-    if "trades" not in st.session_state:
-        st.session_state.trades = load_trades()
+    radar = build_radar()
+    levels = {r["symbol"]: {"support": r["support"], "t1": r["t1"], "t2": r["t2"], "t3": r["t3"]}
+              for r in radar.to_dict("records")}
+    if st.session_state.get("trades_schema") != 2:  # reload/repair once per session (and after code upgrades)
+        st.session_state.trades, st.session_state.trade_problems = load_trades(levels)
+        st.session_state.trades_schema = 2
 
     # ---------------- sidebar ----------------
     with st.sidebar:
@@ -633,6 +718,8 @@ def main() -> None:
             st.rerun()
         max_chase = st.slider("Max extension above CHoCH (no-chase %)", 0.5, 5.0, 2.0, 0.5,
                               help="If the last closed 15m candle is further above the trigger than this, it is treated as a chase, not an entry.")
+        stale_pct = st.slider("Stale-level threshold (% vs radar snapshot)", 5.0, 50.0, STALE_DEVIATION_PCT, 1.0,
+                              help="If live price is further than this from the radar snapshot CMP, the levels are treated as outdated.")
         tradable_only = st.toggle("Tradable only (Pillar 1 + 2 pass)", value=False)
         status_filter = st.multiselect("Status filter", [
             "⚡ ACTIVE", "🟠 EXTENDED", "🟢 IN BUY ZONE", "🟡 PRE-TRIGGER", "⚪ BELOW BUY ZONE",
@@ -646,11 +733,10 @@ def main() -> None:
             st.rerun()
 
     # ---------------- data ----------------
-    radar = build_radar()
     issues = validate_radar(radar)
     live = fetch_live_quotes(tuple(radar["symbol"]))
     quotes, fetched_at = live["quotes"], live["fetched_at"]
-    df = evaluate_setups(radar, quotes, max_chase)
+    df = evaluate_setups(radar, quotes, max_chase, stale_pct)
     regime = get_market_regime()
     now = now_ist()
     mkt = market_state(now)
@@ -706,7 +792,12 @@ def main() -> None:
                    "inside a Pillar 1 + 2 qualified name. Target % and R:R are measured from the CHoCH trigger.")
 
     with tab2:
-        render_trade_book(radar, quotes)
+        for msg in st.session_state.get("trade_problems", []):
+            st.warning("Trade book repair: " + msg)
+        try:
+            render_trade_book(radar, quotes)
+        except Exception as exc:  # keep the other tabs alive
+            st.error(f"Trade book error: {type(exc).__name__}: {exc}")
 
     with tab3:
         st.subheader("Data integrity & framework fit")
@@ -723,8 +814,16 @@ def main() -> None:
                    "Re-derive T1/T2/T3 from swing high and 1.272 / 1.618 extensions, or skip the weak-R:R names.")
         stale = df[df["_key"] == "STALE"]
         if not stale.empty:
-            st.error("Live price is >15% away from the radar snapshot for: " + ", ".join(stale["Symbol"]) +
-                     ". Either the levels are old or the ticker mapping is wrong – verify before trading.")
+            st.error(f"Live price is >{stale_pct:.0f}% away from the radar snapshot for {len(stale)} stock(s). "
+                     "If almost ALL stocks are off, the radar levels are old - refresh them from fresh Bhavcopy. "
+                     "If only a few are off, check the ticker mapping.")
+        st.markdown("**Live vs radar snapshot**")
+        diag = df.loc[df["CMP (Rs)"].notna(), ["Symbol", "Radar Snapshot CMP (Rs)", "CMP (Rs)", "Live vs Snapshot %", "Status"]]
+        diag = diag.reindex(diag["Live vs Snapshot %"].abs().sort_values(ascending=False).index)
+        st.dataframe(diag, hide_index=True, column_config={
+            "Radar Snapshot CMP (Rs)": st.column_config.NumberColumn(format="%.2f"),
+            "CMP (Rs)": st.column_config.NumberColumn(format="%.2f"),
+            "Live vs Snapshot %": st.column_config.NumberColumn(format="%.1f")}, **STRETCH)
         st.dataframe(
             df[["Symbol", "T1 %", "T2 %", "T3 %", "R:R (T1)", "Delivery %", "Volume Spurt (x)", "Tradable (3-Pillar)"]],
             hide_index=True, column_config=COLUMN_CONFIG, **STRETCH,
