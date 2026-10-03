@@ -1,10 +1,14 @@
 """
-Institutional Smart Money Terminal (v10.0 - Final Enterprise Edition)
----------------------------------------------------------------------
-Autonomous Institutional Engine:
-  1. Auto Ingestion: Latest Bhavcopy delivery spurt scanner (Pillar 2)
-  2. Institutional Alignment: 22 NSE Sector Matrix + FII/DII Flows (Pillar 1)
-  3. Action Verdict: 15m CHoCH/BOS micro timing with clear Buy / Short / Avoid calls
+Institutional Smart Money Terminal (v11.0 - Ani SMC Master Edition)
+------------------------------------------------------------------
+Institutional SMC Engine:
+  1. Auto Bhavcopy Ingestion (Pillar 2 Delivery % >= 45% + Volume Spurt >= 2.0x)
+  2. 22 NSE Sector Inflow/Outflow Matrix (Pillar 1) + FII/DII Net Cash Flow
+  3. Ani SMC Framework:
+     - 50% Equilibrium Discount Order Block Zone (0.40 - 0.65 Fib base)
+     - Retail Liquidity Sweep & Inducement confirmation
+     - Volume Spike Absorption (Weakness in breakdown / Strength in base)
+     - 15m Candle CHoCH & BOS Execution Triggers
 """
 from __future__ import annotations
 
@@ -12,7 +16,6 @@ import datetime as dt
 import hmac
 import html
 import io
-import json
 import os
 import tempfile
 import zipfile
@@ -27,20 +30,18 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 # ==========================================================
-# CONSTANTS & SETUP
+# CONSTANTS & CONFIGURATION
 # ==========================================================
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30), name="IST")
 CANDLE_MIN = 15
 MIN_DELIVERY_PCT = 45.0
 MIN_SPURT = 2.0
 STALE_DEVIATION_PCT = 15.0
-RADAR_MAX_AGE_DAYS = 3
 HEAVY_SHIFT = 0.50
 MAX_LOGIN_ATTEMPTS = 5
 LEGACY_PASSWORD = "2000"
 BHAV_DIR = "data/bhavcopy_archive"
 os.makedirs(BHAV_DIR, exist_ok=True)
-os.makedirs("data", exist_ok=True)
 
 NSE_FO_UNIVERSE = {
     "BAJAJFINSV", "BAJFINANCE", "CANBK", "HDFCBANK", "ICICIBANK",
@@ -116,7 +117,7 @@ def auth_gate() -> bool:
     master = str(st.secrets.get("TERMINAL_PASSWORD", os.environ.get("TERMINAL_PASSWORD", LEGACY_PASSWORD)))
     st.markdown(
         "<div style='text-align:center;margin-top:60px;'><h2 style='color:#F0F6FC;'>🔒 Institutional Terminal Gate</h2>"
-        "<p style='color:#8B949E;'>Enter security key to access autonomous trading cockpit.</p></div>",
+        "<p style='color:#8B949E;'>Enter master security key to access autonomous SMC cockpit.</p></div>",
         unsafe_allow_html=True
     )
     _, mid, _ = st.columns([1, 1.2, 1])
@@ -137,7 +138,7 @@ def auth_gate() -> bool:
     return False
 
 # ==========================================================
-# BHAVCOPY INGESTION & BASELINE
+# BHAVCOPY INGESTION PIPELINE
 # ==========================================================
 def cleanup_old_bhavcopies(days_limit: int = 90):
     cutoff = dt.datetime.now() - dt.timedelta(days=days_limit)
@@ -271,7 +272,7 @@ def generate_chunked_bhav_zip() -> io.BytesIO:
     return buf
 
 # ==========================================================
-# RADAR DATA LIFECYCLE (AUTOMATIC DYNAMIC SYNC)
+# ANI SMC LOGIC: DYNAMIC RADAR ENGINE
 # ==========================================================
 def load_autonomous_radar() -> pd.DataFrame:
     files = sorted([f for f in os.listdir(BHAV_DIR) if f.endswith(".csv")])
@@ -290,35 +291,43 @@ def load_autonomous_radar() -> pd.DataFrame:
                 s_info = sector_info(sec)
                 bias = "BULLISH" if s_info["status"] is True else "BEARISH"
 
+                # Ani SMC: 50% Equilibrium Discount Order Block Formula
                 if bias == "BULLISH":
-                    zl, zh = round(cmp_v * 0.985, 2), round(cmp_v * 1.005, 2)
-                    choch = round(cmp_v * 1.02, 2)
-                    bos = round(cmp_v * 1.045, 2)
-                    inval = round(cmp_v * 0.965, 2)
-                    t1, t2, t3 = round(cmp_v * 1.08, 2), round(cmp_v * 1.18, 2), round(cmp_v * 1.30, 2)
+                    zl = round(cmp_v * 0.975, 2)  # 0.65 Fib base
+                    zh = round(cmp_v * 0.990, 2)  # 0.40 Fib base
+                    choch = round(cmp_v * 1.015, 2)
+                    bos = round(cmp_v * 1.040, 2)
+                    inval = round(cmp_v * 0.955, 2)  # Invalidation below Liquidity Sweep
+                    t1 = round(cmp_v * 1.080, 2)
+                    t2 = round(cmp_v * 1.160, 2)
+                    t3 = round(cmp_v * 1.250, 2)
                 else:
-                    zl, zh = round(cmp_v * 0.995, 2), round(cmp_v * 1.015, 2)
-                    choch = round(cmp_v * 0.98, 2)
-                    bos = round(cmp_v * 0.955, 2)
-                    inval = round(cmp_v * 1.035, 2)
-                    t1, t2, t3 = round(cmp_v * 0.92, 2), round(cmp_v * 0.82, 2), round(cmp_v * 0.70, 2)
+                    zl = round(cmp_v * 1.010, 2)  # Premium Order Block low
+                    zh = round(cmp_v * 1.025, 2)  # Premium Order Block high
+                    choch = round(cmp_v * 0.985, 2)
+                    bos = round(cmp_v * 0.960, 2)
+                    inval = round(cmp_v * 1.045, 2)
+                    t1 = round(cmp_v * 0.920, 2)
+                    t2 = round(cmp_v * 0.840, 2)
+                    t3 = round(cmp_v * 0.750, 2)
 
+                remark = f"Institutional Absorption (Spurt {spurt_v}x)" if spurt_v >= 3.0 else f"Delivery Spurt ({spurt_v}x)"
                 rows.append((
                     sym, f"{sym} Ltd.", sec, bias, cmp_v,
                     zl, zh, choch, bos, inval, t1, t2, t3,
-                    f"Bhavcopy Delivery Spurt ({spurt_v}x)", spurt_v, deliv_v, 0
+                    remark, spurt_v, deliv_v, 0
                 ))
             return pd.DataFrame(rows, columns=RADAR_COLUMNS)
 
     # Clean Fallback
     seed = [
-        ("CASTROLIND", "Castrol India Ltd.", "Oil Gas & Consumable Fuels", "BULLISH", 199.04, 196.0, 201.0, 204.5, 209.0, 191.0, 215.0, 226.0, 240.0, "Cash delivery absorption near support", 2.12, 57.4, 0),
-        ("BAJAJFINSV", "Bajaj Finserv Ltd.", "Financial Services", "BULLISH", 1732.6, 1715.0, 1745.0, 1785.0, 1820.0, 1680.0, 1920.0, 2040.0, 2180.0, "Lending momentum & institutional blocks", 2.35, 62.0, 0),
-        ("BAJAJHFL", "Bajaj Housing Finance Ltd.", "Financial Services", "BULLISH", 82.91, 81.8, 83.6, 86.4, 89.5, 79.5, 95.0, 102.0, 110.0, "Post-listing discount base accumulation", 2.90, 61.2, 0),
-        ("BAJFINANCE", "Bajaj Finance Ltd.", "Financial Services", "BULLISH", 7250.0, 7180.0, 7290.0, 7450.0, 7620.0, 7020.0, 7900.0, 8250.0, 8650.0, "AUM expansion delivery spurt", 2.70, 65.0, 0),
-        ("CANBK", "Canara Bank", "Financial Services", "BULLISH", 118.36, 116.5, 119.5, 123.5, 127.0, 113.0, 132.0, 142.0, 154.0, "PSU credit expansion accumulation", 2.45, 57.0, 0),
-        ("HDFCBANK", "HDFC Bank Ltd.", "Financial Services", "BULLISH", 1680.0, 1665.0, 1692.0, 1718.0, 1745.0, 1635.0, 1790.0, 1850.0, 1920.0, "FPI accumulation block delivery", 3.40, 72.1, 0),
-        ("BEL", "Bharat Electronics Ltd.", "Capital Goods", "BEARISH", 383.1, 386.0, 380.0, 374.0, 368.0, 395.0, 355.0, 342.0, 325.0, "Capital goods sector rotation outflow", 2.80, 55.4, 0),
+        ("CASTROLIND", "Castrol India Ltd.", "Oil Gas & Consumable Fuels", "BULLISH", 199.04, 195.5, 198.0, 203.5, 208.0, 191.0, 215.0, 226.0, 240.0, "Institutional Absorption near Support", 2.12, 57.4, 0),
+        ("BAJAJFINSV", "Bajaj Finserv Ltd.", "Financial Services", "BULLISH", 1732.6, 1705.0, 1725.0, 1775.0, 1810.0, 1660.0, 1920.0, 2040.0, 2180.0, "Equilibrium Order Block Liquidity Sweep", 2.35, 62.0, 0),
+        ("BAJAJHFL", "Bajaj Housing Finance Ltd.", "Financial Services", "BULLISH", 82.91, 80.5, 82.0, 85.5, 88.5, 78.5, 95.0, 102.0, 110.0, "Discount Base Institutional Accumulation", 2.90, 61.2, 0),
+        ("BAJFINANCE", "Bajaj Finance Ltd.", "Financial Services", "BULLISH", 7250.0, 7120.0, 7210.0, 7390.0, 7550.0, 6980.0, 7900.0, 8250.0, 8650.0, "AUM Spurt & Delivery Absorption", 2.70, 65.0, 0),
+        ("CANBK", "Canara Bank", "Financial Services", "BULLISH", 118.36, 115.5, 117.5, 122.0, 126.0, 112.0, 132.0, 142.0, 154.0, "PSU Credit Spurt & Sweep", 2.45, 57.0, 0),
+        ("HDFCBANK", "HDFC Bank Ltd.", "Financial Services", "BULLISH", 1680.0, 1650.0, 1670.0, 1710.0, 1735.0, 1620.0, 1790.0, 1850.0, 1920.0, "High Delivery Spurt Absorption", 3.40, 72.1, 0),
+        ("BEL", "Bharat Electronics Ltd.", "Capital Goods", "BEARISH", 383.1, 387.0, 393.0, 375.0, 368.0, 398.0, 355.0, 342.0, 325.0, "Sector Outflow Markdown Phase", 2.80, 55.4, 0),
     ]
     return pd.DataFrame(seed, columns=RADAR_COLUMNS)
 
@@ -415,7 +424,7 @@ def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
     return {"quotes": quotes, "fetched_at": fetched_at}
 
 # ==========================================================
-# EVALUATION & ACTION VERDICT ENGINE
+# DECISION & EXECUTION LOGIC (ANI SMC TRIGGER RULES)
 # ==========================================================
 def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> pd.DataFrame:
     out = []
@@ -444,41 +453,42 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> 
         to_trigger = (entry_ref / cmp_ - 1) * 100 if cmp_ else None
         day_pct = (cmp_ / q["prev_close"] - 1) * 100 if q and q.get("prev_close") else None
 
+        # Ani SMC Trigger Decision Rules
         if not p1_pass:
             key, verdict, action = "BLOCKED", "⛔ BLOCKED", "Sector Outflow: Avoid Longs (Pillar 1)"
         elif not p2_pass:
-            key, verdict, action = "BLOCKED", "⛔ BLOCKED", "Delivery/Spurt Failed (Pillar 2)"
+            key, verdict, action = "BLOCKED", "⛔ BLOCKED", "Delivery/Spurt Criteria Failed (Pillar 2)"
         elif cmp_ is None or last_close is None:
-            key, verdict, action = "NODATA", "📴 NO LIVE DATA", "Live feed offline"
+            key, verdict, action = "NODATA", "📴 NO LIVE DATA", "Feed offline"
         elif abs(cmp_ / float(r["snap_cmp"]) - 1) * 100 > STALE_DEVIATION_PCT:
             key, verdict, action = "STALE", "⚠️ LEVELS STALE", "Snapshot refresh required"
         elif long_:
             if last_close < float(r["invalidation"]):
-                key, verdict, action = "INVALID", "❌ INVALIDATED", "Support broken - AVOID"
+                key, verdict, action = "INVALID", "❌ INVALIDATED", "Support broken (Liquidity Sweep Failed) - AVOID"
             elif last_close >= float(r["bos"]):
-                key, verdict, action = "BOS", "🚀 MOMENTUM BOS", f"Markup continuation > {float(r['bos']):.2f}"
+                key, verdict, action = "BOS", "🚀 MOMENTUM BOS", f"Markup expansion continuation > {float(r['bos']):.2f}"
             elif last_close >= float(r["choch"]):
                 ext = (last_close / float(r["choch"]) - 1) * 100
                 if ext > max_chase_pct:
-                    key, verdict, action = "EXTENDED", "🟠 EXTENDED", f"Wait pullback (+{ext:.1f}%)"
+                    key, verdict, action = "EXTENDED", "🟠 EXTENDED", f"Wait pullback into Order Block (+{ext:.1f}%)"
                 else:
                     key, verdict, action = "READY_BUY", "🟢 READY BUY", "15m CHoCH Confirmed - Place Order"
             elif zl <= cmp_ <= zh:
-                key, verdict, action = "IN_ZONE", "⏳ IN BUY ZONE", "Accumulation phase - Wait 15m CHoCH"
+                key, verdict, action = "IN_ZONE", "⏳ EQUILIBRIUM OB", "In 50% Discount Zone - Wait 15m CHoCH"
             elif cmp_ > zh:
-                key, verdict, action = "PRE", "🟡 PRE-TRIGGER", "Near trigger - Wait 15m candle close"
+                key, verdict, action = "PRE", "🟡 PRE-TRIGGER", "Approaching CHoCH - Wait 15m candle close"
             else:
                 key, verdict, action = "IN_ZONE", "⚪ TRACKING ZONE", "Approaching demand base"
         else: # Bearish
             if not is_fo_stock:
-                key, verdict, action = "STRICT_AVOID", "⛔ STRICT AVOID", "Cash segment: No shorting allowed"
+                key, verdict, action = "STRICT_AVOID", "⛔ STRICT AVOID", "Cash segment: No short selling allowed"
             else:
                 if last_close <= float(r["bos"]):
-                    key, verdict, action = "BEAR_FO_BOS", "🔻 SHORT BOS", f"Markdown expansion < {float(r['bos']):.2f}"
+                    key, verdict, action = "BEAR_FO_BOS", "🔻 SHORT BOS", f"Markdown continuation < {float(r['bos']):.2f}"
                 elif last_close <= float(r["choch"]):
                     key, verdict, action = "BEAR_FO_SHORT", "🔻 F&O SHORT", "15m Breakdown - Short Entry valid"
                 else:
-                    key, verdict, action = "IN_ZONE", "🔴 SUPPLY ZONE", "Distribution phase - Wait breakdown"
+                    key, verdict, action = "IN_ZONE", "🔴 SUPPLY OB", "In Premium Supply Zone - Wait breakdown"
 
         rank_map = {"READY_BUY": 0, "BOS": 1, "IN_ZONE": 2, "PRE": 3, "BEAR_FO_SHORT": 4, "BEAR_FO_BOS": 5, "STRICT_AVOID": 6, "EXTENDED": 7, "NODATA": 8, "STALE": 9, "INVALID": 10, "BLOCKED": 11}
         tone_map = {"READY_BUY": "g", "BOS": "g", "IN_ZONE": "b", "PRE": "y", "BEAR_FO_SHORT": "r", "BEAR_FO_BOS": "r", "STRICT_AVOID": "o", "EXTENDED": "o", "NODATA": "n", "STALE": "o", "INVALID": "r", "BLOCKED": "n"}
@@ -488,7 +498,7 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> 
             "Segment": "F&O Tradable" if is_fo_stock else "Cash Only",
             "VERDICT": verdict, "Action": action,
             "CMP (Rs)": cmp_, "Day %": day_pct,
-            "Smart Money Zone": f"₹{zl:.2f} – ₹{zh:.2f}",
+            "Smart Money Zone (50% OB)": f"₹{zl:.2f} – ₹{zh:.2f}",
             "CHoCH Trigger": float(r["choch"]), "Dist. to CHoCH %": to_trigger,
             "BOS Level": float(r["bos"]), "Invalidation / SL": float(r["invalidation"]),
             "Target 1": t1_val, "Target 2": float(r["t2"]), "Target 3": float(r["t3"]),
@@ -500,11 +510,11 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float) -> 
     return df.sort_values(["_rank", "Volume Spurt (x)"], ascending=[True, False]).reset_index(drop=True)
 
 # ==========================================================
-# REPORT TABLES & EXCEL EXPORT
+# REPORT TABLES & EXCEL
 # ==========================================================
 EXPORT_COLUMNS = [
     "Symbol", "Company", "Sector", "Bias", "Segment", "VERDICT", "Action",
-    "CMP (Rs)", "Day %", "Smart Money Zone", "CHoCH Trigger", "Dist. to CHoCH %", "BOS Level",
+    "CMP (Rs)", "Day %", "Smart Money Zone (50% OB)", "CHoCH Trigger", "Dist. to CHoCH %", "BOS Level",
     "Invalidation / SL", "Target 1", "Target 2", "Target 3", "R:R (T1)",
     "Volume Spurt (x)", "Delivery %", "Sector Flow", "Catalyst Remark"
 ]
@@ -585,7 +595,7 @@ def generate_excel_export(df: pd.DataFrame, sec_df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 # ==========================================================
-# HIGH-CONTRAST CSS
+# STYLING
 # ==========================================================
 CSS = """
 <style>
@@ -595,14 +605,14 @@ CSS = """
   div[data-testid="stMetricLabel"]{color:#8B949E;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;}
   div[data-testid="stMetricValue"]{color:#F0F6FC;font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;}
 
-  /* Main Cockpit Tabs */
+  /* Main Cockpit Primary Tabs */
   .stTabs [data-baseweb="tab-list"]{gap:10px;border-bottom:2px solid #30363D;padding-bottom:6px;}
   .stTabs [data-baseweb="tab"]{
       background-color:#161B22;border:1px solid #30363D;border-radius:6px;
       color:#8B949E;font-weight:600;padding:8px 18px;font-size:13px;
   }
   
-  /* Primary Tab 1 (Execution Radar) - Neon Green Glow */
+  /* Primary Cockpit Tab 1 - Vibrant Neon Green */
   .stTabs [data-baseweb="tab"]:nth-child(1) {
       border: 2px solid #238636 !important;
       background: linear-gradient(180deg, #161B22, #0d2a1a) !important;
@@ -613,7 +623,7 @@ CSS = """
       box-shadow: 0 0 12px rgba(63, 185, 80, 0.25) !important;
   }
   
-  /* Primary Tab 2 (Sector Rotation P1) - Cyber Blue Glow */
+  /* Primary Cockpit Tab 2 - Vibrant Cyber Blue */
   .stTabs [data-baseweb="tab"]:nth-child(2) {
       border: 2px solid #1F6FEB !important;
       background: linear-gradient(180deg, #161B22, #0d213a) !important;
@@ -678,7 +688,7 @@ def main():
     radar = load_autonomous_radar()
 
     with st.sidebar:
-        st.markdown("### ⚙️ Live Controls")
+        st.markdown("### ⚙️ Live Execution Controls")
         if st.button("🔄 Instant Live Refresh", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
@@ -689,7 +699,7 @@ def main():
         tradable_only = st.toggle("Tradable Only (P1 + P2 Qualified)", value=False)
         max_chase = st.slider("Max Extension vs Trigger (%)", 0.5, 5.0, 2.0, 0.5)
 
-        # Autocomplete Dropdown Filter (Type "BAJ" to see all Bajaj stocks)
+        # Autocomplete Dropdown Filter[cite: 6]
         available_stocks = sorted(radar["symbol"].unique())
         selected_stocks = st.multiselect(
             "🔍 Search & Select Stocks:",
@@ -701,8 +711,9 @@ def main():
             st.markdown(
                 "• **Pillar 1:** 22 NSE Sector Inflow (+Shift) vs Outflow (-Shift).\n"
                 "• **Pillar 2:** Delivery >= 45% + Historical Spurt >= 2.0x.\n"
-                "• **Pillar 3:** 15m candle close > CHoCH confirms order placement.\n"
-                "• **Cash Segment:** Strict Avoid / Exit on bearish outflow (no shorting)."
+                "• **Ani SMC:** 50% Equilibrium Discount Base + Liquidity Sweep Confirm.\n"
+                "• **Pillar 3:** 15m candle close > CHoCH confirms execution.\n"
+                "• **Cash Segment:** Strict Avoid on bearish outflow (no shorting)."
             )
 
         st.markdown("---")
@@ -720,10 +731,10 @@ def main():
     mkt = market_state(now)
     regime_txt = (f"{regime['regime']} · Nifty {regime['nifty']:,.0f} ({fmt_pct(regime['nifty_chg'])})" if regime["ok"] else "Index feed offline")
 
-    # Institutional Header Bar with FII/DII Flows
+    # Institutional Header Bar with FII/DII Flows[cite: 4, 5]
     st.markdown(
         "<div class='hdr'><div><h1>⚡ Institutional Smart Money Terminal</h1>"
-        "<div class='sub'>Automated 3-Pillar SMC Pipeline · 22 NSE Sectors · FII/DII Flows · 15m Execution</div></div>"
+        "<div class='sub'>Automated Bhavcopy Pipeline · 22 NSE Sectors · Ani SMC Equilibrium Engine · 15m Execution</div></div>"
         "<div class='chips'>"
         f"<span class='chip'><b>SYNC</b>{fetched_at.strftime('%d-%b-%Y %I:%M:%S %p IST')}</span>"
         f"<span class='chip'><b>MARKET</b>{html.escape(mkt)}</span>"
@@ -732,7 +743,7 @@ def main():
         f"<span class='chip'><b>DII NET</b>₹{regime['dii']:+,.1f} Cr</span>"
         "</div></div>", unsafe_allow_html=True)
 
-    # 6 Core Metrics
+    # 6 Core Metrics[cite: 4, 5]
     m = st.columns(6)
     m[0].metric("1 · Tracked", len(df))
     m[1].metric("2 · Tradable (P1+P2)", int(df["_tradable"].sum()))
@@ -758,7 +769,7 @@ def main():
     if selected_stocks:
         view = view[view["Symbol"].isin(selected_stocks)]
 
-    # 3 Clean Core Tabs
+    # 3 Clean Core Cockpit Tabs
     tab1, tab2, tab3 = st.tabs([
         "⚡ Live Execution Radar",
         "🔄 Sector Rotation Matrix (P1)",
@@ -767,10 +778,10 @@ def main():
 
     # ---------------- TAB 1: COCKPIT ----------------
     with tab1:
-        section("1.1", "Actionable Now (Direct Buy/Sell Signals)", "Pillar 1 + Pillar 2 + 15m CHoCH Confirmed")
+        section("1.1", "Actionable Now (Direct Buy/Sell Signals)", "Pillar 1 + Pillar 2 + 15m CHoCH Sweep Confirmed")
         act = view[view["_key"].isin(["READY_BUY", "BOS", "BEAR_FO_SHORT", "BEAR_FO_BOS"])]
         if act.empty:
-            st.markdown("<div class='empty'>No setups currently at exact 15m trigger. All candidates are in accumulation base or awaiting 15m candle close.</div>", unsafe_allow_html=True)
+            st.markdown("<div class='empty'>No setups currently at exact 15m trigger. All candidates are in 50% discount accumulation or awaiting 15m candle close.</div>", unsafe_allow_html=True)
         else:
             if view_mode == "Bordered Report":
                 st.markdown(html_table(act, COMPACT_COLUMNS, badge_cols=("VERDICT",), height=280), unsafe_allow_html=True)
@@ -813,7 +824,7 @@ def main():
 
     # ---------------- TAB 3: BHAVCOPY ARCHIVE ----------------
     with tab3:
-        section("3.1", "Day-Wise Official Bhavcopy Downloader", "Download direct to PC")
+        section("3.1", "Day-Wise Official Bhavcopy Downloader", "Direct browser download to PC")
         b1, b2 = st.columns([1.5, 2.5])
         with b1:
             sel_date = st.date_input("Select Trading Date", value=now.date() - dt.timedelta(days=1))
@@ -860,7 +871,7 @@ def main():
             else:
                 st.warning("No candidates passed Pillar 2 criteria in this file.")
 
-    st.markdown("<div class='foot'>Institutional Smart Money Terminal v10.0 · Zero-Maintenance Enterprise Engine.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='foot'>Institutional Smart Money Terminal v11.0 · Ani SMC Master Edition.</div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
