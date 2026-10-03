@@ -535,7 +535,7 @@ with tab2:
         with st.expander("🔍 Verify sector data (accuracy check)"):
             sm = E.fetch_sector_map()
             st.write(f"**Sector map rows:** {len(sm)}")
-            if not sm.empty:
+            if len(sm)>0:
                 st.dataframe(sm.head(10), hide_index=True, use_container_width=True)
 
             missing = pool[~pool.Symbol.isin(sm.Symbol)] if not sm.empty else pool
