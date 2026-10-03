@@ -58,7 +58,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 0. STRICT PASSWORD AUTHENTICATION LOCK (KEY: 2000)
+# 0. STRICT PASSWORD AUTHENTICATION LOCK
 # ==========================================
 MASTER_PASSWORD = "2000"
 
@@ -170,7 +170,7 @@ def load_full_nse_universe():
 NSE_DIRECTORY = load_full_nse_universe()
 
 # ==========================================
-# 2. ACTIVE PORTFOLIO BOOK STORAGE
+# ACTIVE PORTFOLIO BOOK STORAGE
 # ==========================================
 TRADE_BOOK_PATH = "data/active_trades.json"
 def load_trades():
@@ -191,489 +191,169 @@ if "trades" not in st.session_state:
     st.session_state.trades = load_trades()
 
 # ==========================================
-# 3. 41 ACTIVE ACCUMULATION STOCKS BASE
+# 2. COMPLETE ACCUMULATION UNIVERSE BASE
 # ==========================================
 EXCEL_ACCUMULATION_RAW = [
-    {"Symbol": "BEL", "Company": "Bharat Electronics Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 383.10, "Smart Money Buy Range (Rs)": "₹380.00 – ₹386.00", "CHoCH Trigger (Rs)": 392.50, "Support / TSL (Rs)": 374.50, "Target 1": 416.00, "Target 2": 435.00, "Target 3": 465.00, "Hinglish News & Catalyst Remark": "Defence order book surge, awaiting 15m breakout above pivot", "Volume Spurt": "2.80x", "Recent Deliv %": "55.4%", "Radar Age": "4 Days"},
-    {"Symbol": "STARHEALTH", "Company": "Star Health and Allied Insurance", "Sector": "Financial Services", "Sector Alignment": "☑️️ Inflow Aligned", "CMP (Rs)": 537.70, "Smart Money Buy Range (Rs)": "₹530.00 – ₹542.00", "CHoCH Trigger (Rs)": 558.00, "Support / TSL (Rs)": 513.00, "Target 1": 595.00, "Target 2": 625.00, "Target 3": 660.00, "Hinglish News & Catalyst Remark": "Pullback support level hold kar raha hai, delivery 59.6%", "Volume Spurt": "4.77x", "Recent Deliv %": "59.6%", "Radar Age": "1 Day"},
-    {"Symbol": "PNCINFRA", "Company": "PNC Infratech Ltd.", "Sector": "Construction", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 138.16, "Smart Money Buy Range (Rs)": "₹136.00 – ₹139.50", "CHoCH Trigger (Rs)": 143.90, "Support / TSL (Rs)": 128.40, "Target 1": 152.00, "Target 2": 162.00, "Target 3": 175.00, "Hinglish News & Catalyst Remark": "Brokerage houses se target upgrade & heavy buying pressure", "Volume Spurt": "3.77x", "Recent Deliv %": "45.4%", "Radar Age": "1 Day"},
-    {"Symbol": "SHREECEM", "Company": "Shree Cement Ltd.", "Sector": "Construction Materials", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 21900.00, "Smart Money Buy Range (Rs)": "₹21700 – ₹22100", "CHoCH Trigger (Rs)": 22650.00, "Support / TSL (Rs)": 21350.00, "Target 1": 23800.00, "Target 2": 24900.00, "Target 3": 26200.00, "Hinglish News & Catalyst Remark": "Share Price Near Low With Mixed Valuation, institutional accumulation", "Volume Spurt": "3.47x", "Recent Deliv %": "51.9%", "Radar Age": "1 Day"},
-    {"Symbol": "KAJARIACER", "Company": "Kajaria Ceramics Ltd.", "Sector": "Consumer Durables", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1225.10, "Smart Money Buy Range (Rs)": "₹1210.00 – ₹1235.00", "CHoCH Trigger (Rs)": 1255.00, "Support / TSL (Rs)": 1180.00, "Target 1": 1315.00, "Target 2": 1380.00, "Target 3": 1450.00, "Hinglish News & Catalyst Remark": "Fundamentals & sector valuation expansion", "Volume Spurt": "3.28x", "Recent Deliv %": "63.5%", "Radar Age": "1 Day"},
-    {"Symbol": "ANURAS", "Company": "Anuras Chemicals Ltd.", "Sector": "Chemicals", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1163.70, "Smart Money Buy Range (Rs)": "₹1150.00 – ₹1175.00", "CHoCH Trigger (Rs)": 1195.00, "Support / TSL (Rs)": 1135.00, "Target 1": 1280.00, "Target 2": 1340.00, "Target 3": 1410.00, "Hinglish News & Catalyst Remark": "Specialty chemical demand & base level institutional support", "Volume Spurt": "3.12x", "Recent Deliv %": "58.1%", "Radar Age": "1 Day"},
-    {"Symbol": "VESUVIUS", "Company": "Vesuvius India Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 404.10, "Smart Money Buy Range (Rs)": "₹398.00 – ₹408.00", "CHoCH Trigger (Rs)": 422.00, "Support / TSL (Rs)": 388.00, "Target 1": 465.00, "Target 2": 495.00, "Target 3": 530.00, "Hinglish News & Catalyst Remark": "REG - American Century Inv Vesuvius plc Form 8.3 heavy stake filing", "Volume Spurt": "2.55x", "Recent Deliv %": "48.9%", "Radar Age": "1 Day"},
-    {"Symbol": "INDHOTEL", "Company": "Indian Hotels Co Ltd.", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 718.00, "Smart Money Buy Range (Rs)": "₹710.00 – ₹724.00", "CHoCH Trigger (Rs)": 738.00, "Support / TSL (Rs)": 698.00, "Target 1": 785.00, "Target 2": 820.00, "Target 3": 855.00, "Hinglish News & Catalyst Remark": "Share price rise 2.2%: valuation and sector rotation positive", "Volume Spurt": "2.49x", "Recent Deliv %": "60.6%", "Radar Age": "1 Day"},
-    {"Symbol": "ELECTCAST", "Company": "Electrosteel Castings Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 74.54, "Smart Money Buy Range (Rs)": "₹73.00 – ₹75.50", "CHoCH Trigger (Rs)": 77.80, "Support / TSL (Rs)": 71.50, "Target 1": 84.00, "Target 2": 89.00, "Target 3": 96.00, "Hinglish News & Catalyst Remark": "Brokerage houses se target upgrade & buy call", "Volume Spurt": "2.46x", "Recent Deliv %": "47.4%", "Radar Age": "1 Day"},
-    {"Symbol": "IIFLCAPS", "Company": "IIFL Capital Services Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 345.60, "Smart Money Buy Range (Rs)": "₹340.00 – ₹348.00", "CHoCH Trigger (Rs)": 354.00, "Support / TSL (Rs)": 332.00, "Target 1": 375.00, "Target 2": 395.00, "Target 3": 420.00, "Hinglish News & Catalyst Remark": "Institutional block deal / heavy stake accumulation", "Volume Spurt": "2.40x", "Recent Deliv %": "66.4%", "Radar Age": "1 Day"},
-    {"Symbol": "EMAMILTD", "Company": "Emami Ltd.", "Sector": "Fast Moving Consumer Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 372.65, "Smart Money Buy Range (Rs)": "₹368.00 – ₹375.00", "CHoCH Trigger (Rs)": 386.00, "Support / TSL (Rs)": 361.00, "Target 1": 425.00, "Target 2": 445.00, "Target 3": 470.00, "Hinglish News & Catalyst Remark": "Price rise, lower level valuation support", "Volume Spurt": "2.32x", "Recent Deliv %": "52.9%", "Radar Age": "1 Day"},
-    {"Symbol": "WESTLIFE", "Company": "Westlife Foodworld Ltd.", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 588.05, "Smart Money Buy Range (Rs)": "₹580.00 – ₹594.00", "CHoCH Trigger (Rs)": 605.00, "Support / TSL (Rs)": 568.00, "Target 1": 645.00, "Target 2": 680.00, "Target 3": 720.00, "Hinglish News & Catalyst Remark": "Institutional block deal / heavy stake accumulation", "Volume Spurt": "2.18x", "Recent Deliv %": "49.9%", "Radar Age": "1 Day"},
-    {"Symbol": "CASTROLIND", "Company": "Castrol India Ltd.", "Sector": "Oil Gas & Consumable Fuels", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 199.04, "Smart Money Buy Range (Rs)": "₹196.00 – ₹201.00", "CHoCH Trigger (Rs)": 204.50, "Support / TSL (Rs)": 191.00, "Target 1": 215.00, "Target 2": 226.00, "Target 3": 240.00, "Hinglish News & Catalyst Remark": "Strong cash delivery, deserve a spot on watchlist", "Volume Spurt": "2.12x", "Recent Deliv %": "57.4%", "Radar Age": "1 Day"},
-    {"Symbol": "ENTERO", "Company": "Entero Healthcare Solutions", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1145.00, "Smart Money Buy Range (Rs)": "₹1130.00 – ₹1155.00", "CHoCH Trigger (Rs)": 1175.00, "Support / TSL (Rs)": 1105.00, "Target 1": 1240.00, "Target 2": 1300.00, "Target 3": 1380.00, "Hinglish News & Catalyst Remark": "Healthcare logistics expansion & institutional absorption", "Volume Spurt": "2.65x", "Recent Deliv %": "58.2%", "Radar Age": "1 Day"},
-    {"Symbol": "SANSERA", "Company": "Sansera Engineering Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1320.00, "Smart Money Buy Range (Rs)": "₹1305.00 – ₹1335.00", "CHoCH Trigger (Rs)": 1358.00, "Support / TSL (Rs)": 1275.00, "Target 1": 1430.00, "Target 2": 1500.00, "Target 3": 1580.00, "Hinglish News & Catalyst Remark": "EV aerospace components order book expansion", "Volume Spurt": "2.45x", "Recent Deliv %": "46.7%", "Radar Age": "1 Day"},
-    {"Symbol": "EIHOTEL", "Company": "EIH Associated Hotels", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 880.00, "Smart Money Buy Range (Rs)": "₹868.00 – ₹890.00", "CHoCH Trigger (Rs)": 908.00, "Support / TSL (Rs)": 850.00, "Target 1": 965.00, "Target 2": 1020.00, "Target 3": 1090.00, "Hinglish News & Catalyst Remark": "Hospitality sector inflow shift, delivery build-up", "Volume Spurt": "2.35x", "Recent Deliv %": "55.0%", "Radar Age": "1 Day"},
-    {"Symbol": "IKS", "Company": "IKS Health", "Sector": "Information Technology", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1420.00, "Smart Money Buy Range (Rs)": "₹1400.00 – ₹1435.00", "CHoCH Trigger (Rs)": 1465.00, "Support / TSL (Rs)": 1370.00, "Target 1": 1560.00, "Target 2": 1640.00, "Target 3": 1720.00, "Hinglish News & Catalyst Remark": "IT healthcare services steady institutional base", "Volume Spurt": "2.20x", "Recent Deliv %": "48.1%", "Radar Age": "1 Day"},
-    {"Symbol": "SHRIPISTON", "Company": "Shriram Pistons & Rings", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 2040.00, "Smart Money Buy Range (Rs)": "₹2015.00 – ₹2060.00", "CHoCH Trigger (Rs)": 2110.00, "Support / TSL (Rs)": 1965.00, "Target 1": 2240.00, "Target 2": 2350.00, "Target 3": 2480.00, "Hinglish News & Catalyst Remark": "Strong cash delivery absorption at support band", "Volume Spurt": "2.15x", "Recent Deliv %": "54.2%", "Radar Age": "1 Day"},
-    {"Symbol": "JKCEMENT", "Company": "JK Cement Ltd.", "Sector": "Construction Materials", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 4350.00, "Smart Money Buy Range (Rs)": "₹4310.00 – ₹4390.00", "CHoCH Trigger (Rs)": 4465.00, "Support / TSL (Rs)": 4220.00, "Target 1": 4700.00, "Target 2": 4900.00, "Target 3": 5150.00, "Hinglish News & Catalyst Remark": "Grey cement demand uptick, strong delivery 61.3%", "Volume Spurt": "2.40x", "Recent Deliv %": "61.3%", "Radar Age": "1 Day"},
-    {"Symbol": "KOTAKBANK", "Company": "Kotak Mahindra Bank", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1820.00, "Smart Money Buy Range (Rs)": "₹1805.00 – ₹1835.00", "CHoCH Trigger (Rs)": 1858.00, "Support / TSL (Rs)": 1775.00, "Target 1": 1940.00, "Target 2": 2010.00, "Target 3": 2100.00, "Hinglish News & Catalyst Remark": "Banking sector heavy inflow shift, 68.5% delivery", "Volume Spurt": "3.10x", "Recent Deliv %": "68.5%", "Radar Age": "1 Day"},
-    {"Symbol": "AIAENG", "Company": "AIA Engineering Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 3824.40, "Smart Money Buy Range (Rs)": "₹3790.00 – ₹3845.00", "CHoCH Trigger (Rs)": 3950.00, "Support / TSL (Rs)": 3710.00, "Target 1": 4180.00, "Target 2": 4350.00, "Target 3": 4580.00, "Hinglish News & Catalyst Remark": "Capital Goods strong base absorption", "Volume Spurt": "2.25x", "Recent Deliv %": "52.4%", "Radar Age": "1 Day"},
-    {"Symbol": "POLYCAB", "Company": "Polycab India Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 6450.00, "Smart Money Buy Range (Rs)": "₹6380.00 – ₹6490.00", "CHoCH Trigger (Rs)": 6620.00, "Support / TSL (Rs)": 6240.00, "Target 1": 7000.00, "Target 2": 7350.00, "Target 3": 7700.00, "Hinglish News & Catalyst Remark": "Infrastructure cables order surge, institutional hold", "Volume Spurt": "2.80x", "Recent Deliv %": "56.0%", "Radar Age": "1 Day"},
-    {"Symbol": "TI", "Company": "Tube Investments of India", "Sector": "Fast Moving Consumer Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 4120.00, "Smart Money Buy Range (Rs)": "₹4080.00 – ₹4150.00", "CHoCH Trigger (Rs)": 4235.00, "Support / TSL (Rs)": 3980.00, "Target 1": 4480.00, "Target 2": 4680.00, "Target 3": 4900.00, "Hinglish News & Catalyst Remark": "EV 3-wheeler ramp up, steady accumulation", "Volume Spurt": "2.10x", "Recent Deliv %": "51.2%", "Radar Age": "1 Day"},
-    {"Symbol": "SONACOMS", "Company": "Sona BLW Precision Forgings", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 695.00, "Smart Money Buy Range (Rs)": "₹688.00 – ₹702.00", "CHoCH Trigger (Rs)": 718.00, "Support / TSL (Rs)": 668.00, "Target 1": 765.00, "Target 2": 805.00, "Target 3": 850.00, "Hinglish News & Catalyst Remark": "Driveline EV contracts win, smart money buying", "Volume Spurt": "2.30x", "Recent Deliv %": "53.8%", "Radar Age": "1 Day"},
-    {"Symbol": "LENSKART", "Company": "Lenskart Solutions", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 385.00, "Smart Money Buy Range (Rs)": "₹380.00 – ₹389.00", "CHoCH Trigger (Rs)": 398.00, "Support / TSL (Rs)": 368.00, "Target 1": 430.00, "Target 2": 455.00, "Target 3": 485.00, "Hinglish News & Catalyst Remark": "Omnichannel store expansion, retail inflow strong", "Volume Spurt": "2.75x", "Recent Deliv %": "62.1%", "Radar Age": "1 Day"},
-    {"Symbol": "NATCOPHARM", "Company": "Natco Pharma Ltd.", "Sector": "Healthcare", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1410.00, "Smart Money Buy Range (Rs)": "₹1395.00 – ₹1425.00", "CHoCH Trigger (Rs)": 1450.00, "Support / TSL (Rs)": 1365.00, "Target 1": 1540.00, "Target 2": 1620.00, "Target 3": 1700.00, "Hinglish News & Catalyst Remark": "Healthcare sector continuous capital pump", "Volume Spurt": "2.85x", "Recent Deliv %": "64.0%", "Radar Age": "1 Day"},
-    {"Symbol": "VAML", "Company": "V-Guard Industries / VAML", "Sector": "Metals & Mining", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 430.00, "Smart Money Buy Range (Rs)": "₹424.00 – ₹435.00", "CHoCH Trigger (Rs)": 446.00, "Support / TSL (Rs)": 415.00, "Target 1": 475.00, "Target 2": 498.00, "Target 3": 525.00, "Hinglish News & Catalyst Remark": "Base absorption complete, delivery spurt 2.1x", "Volume Spurt": "2.10x", "Recent Deliv %": "49.0%", "Radar Age": "1 Day"},
-    {"Symbol": "PNBHOUSING", "Company": "PNB Housing Finance", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 940.00, "Smart Money Buy Range (Rs)": "₹930.00 – ₹948.00", "CHoCH Trigger (Rs)": 968.00, "Support / TSL (Rs)": 905.00, "Target 1": 1040.00, "Target 2": 1090.00, "Target 3": 1150.00, "Hinglish News & Catalyst Remark": "Affordable housing loan book expansion", "Volume Spurt": "3.15x", "Recent Deliv %": "58.7%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJAJHFL", "Company": "Bajaj Housing Finance Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️️ Inflow Aligned", "CMP (Rs)": 82.91, "Smart Money Buy Range (Rs)": "₹81.80 – ₹83.60", "CHoCH Trigger (Rs)": 86.40, "Support / TSL (Rs)": 79.50, "Target 1": 95.00, "Target 2": 102.00, "Target 3": 110.00, "Hinglish News & Catalyst Remark": "Strong institutional base absorption post listing", "Volume Spurt": "2.90x", "Recent Deliv %": "61.2%", "Radar Age": "1 Day"},
-    {"Symbol": "TATAMOTORS", "Company": "Tata Motors Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 948.30, "Smart Money Buy Range (Rs)": "₹940.00 – ₹956.00", "CHoCH Trigger (Rs)": 978.00, "Support / TSL (Rs)": 922.00, "Target 1": 1045.00, "Target 2": 1090.00, "Target 3": 1140.00, "Hinglish News & Catalyst Remark": "JLR margin guidance & EV domestic market leadership", "Volume Spurt": "2.10x", "Recent Deliv %": "48.0%", "Radar Age": "1 Day"},
-    {"Symbol": "CANBK", "Company": "Canara Bank", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 118.36, "Smart Money Buy Range (Rs)": "₹116.50 – ₹119.50", "CHoCH Trigger (Rs)": 123.50, "Support / TSL (Rs)": 113.00, "Target 1": 132.00, "Target 2": 142.00, "Target 3": 154.00, "Hinglish News & Catalyst Remark": "PSU banking delivery accumulation & credit expansion", "Volume Spurt": "2.45x", "Recent Deliv %": "57.0%", "Radar Age": "1 Day"},
-    {"Symbol": "COFORGE", "Company": "Coforge Ltd.", "Sector": "Information Technology", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 7850.00, "Smart Money Buy Range (Rs)": "₹7780.00 – ₹7920.00", "CHoCH Trigger (Rs)": 8080.00, "Support / TSL (Rs)": 7580.00, "Target 1": 8500.00, "Target 2": 8900.00, "Target 3": 9300.00, "Hinglish News & Catalyst Remark": "Large order deal wins, IT base building", "Volume Spurt": "2.30x", "Recent Deliv %": "50.5%", "Radar Age": "1 Day"},
-    {"Symbol": "ATHERENERG", "Company": "Ather Energy Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1406.10, "Smart Money Buy Range (Rs)": "₹1385.00 – ₹1420.00", "CHoCH Trigger (Rs)": 1455.00, "Support / TSL (Rs)": 1350.00, "Target 1": 1560.00, "Target 2": 1640.00, "Target 3": 1740.00, "Hinglish News & Catalyst Remark": "EV scooter market share expansion", "Volume Spurt": "2.05x", "Recent Deliv %": "49.5%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJAJ-AUTO", "Company": "Bajaj Auto Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 10045.00, "Smart Money Buy Range (Rs)": "₹9950.00 – ₹10120.00", "CHoCH Trigger (Rs)": 10350.00, "Support / TSL (Rs)": 9750.00, "Target 1": 11200.00, "Target 2": 11800.00, "Target 3": 12500.00, "Hinglish News & Catalyst Remark": "Export recovery and CNG motorcycle sales momentum", "Volume Spurt": "2.25x", "Recent Deliv %": "53.0%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJFINANCE", "Company": "Bajaj Finance Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 7250.00, "Smart Money Buy Range (Rs)": "₹7180.00 – ₹7290.00", "CHoCH Trigger (Rs)": 7450.00, "Support / TSL (Rs)": 7020.00, "Target 1": 7900.00, "Target 2": 8250.00, "Target 3": 8650.00, "Hinglish News & Catalyst Remark": "AUM growth 28%+ YoY, institutional buying steady", "Volume Spurt": "2.70x", "Recent Deliv %": "65.0%", "Radar Age": "1 Day"},
-    {"Symbol": "BAJAJFINSV", "Company": "Bajaj Finserv Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1732.60, "Smart Money Buy Range (Rs)": "₹1715.00 – ₹1745.00", "CHoCH Trigger (Rs)": 1785.00, "Support / TSL (Rs)": 1680.00, "Target 1": 1920.00, "Target 2": 2040.00, "Target 3": 2180.00, "Hinglish News & Catalyst Remark": "Financial Services heavy inflow alignment", "Volume Spurt": "2.35x", "Recent Deliv %": "62.0%", "Radar Age": "1 Day"},
-    {"Symbol": "HDFCBANK", "Company": "HDFC Bank Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1680.00, "Smart Money Buy Range (Rs)": "₹1665.00 – ₹1692.00", "CHoCH Trigger (Rs)": 1718.00, "Support / TSL (Rs)": 1635.00, "Target 1": 1790.00, "Target 2": 1850.00, "Target 3": 1920.00, "Hinglish News & Catalyst Remark": "FPI weight adjustment & CD ratio normalization", "Volume Spurt": "3.40x", "Recent Deliv %": "72.1%", "Radar Age": "1 Day"},
-    {"Symbol": "ICICIBANK", "Company": "ICICI Bank Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1285.00, "Smart Money Buy Range (Rs)": "₹1272.00 – ₹1294.00", "CHoCH Trigger (Rs)": 1315.00, "Support / TSL (Rs)": 1250.00, "Target 1": 1380.00, "Target 2": 1430.00, "Target 3": 1490.00, "Hinglish News & Catalyst Remark": "Consistent return ratios & credit demand", "Volume Spurt": "2.95x", "Recent Deliv %": "69.4%", "Radar Age": "1 Day"},
-    {"Symbol": "TCS", "Company": "Tata Consultancy Services", "Sector": "Information Technology", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 4260.00, "Smart Money Buy Range (Rs)": "₹4220.00 – ₹4280.00", "CHoCH Trigger (Rs)": 4350.00, "Support / TSL (Rs)": 4160.00, "Target 1": 4550.00, "Target 2": 4700.00, "Target 3": 4900.00, "Hinglish News & Catalyst Remark": "BFSI spending revival & tier-1 IT stability", "Volume Spurt": "2.15x", "Recent Deliv %": "56.5%", "Radar Age": "1 Day"},
-    {"Symbol": "CUPID", "Company": "Cupid Ltd.", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 92.40, "Smart Money Buy Range (Rs)": "₹91.00 – ₹93.50", "CHoCH Trigger (Rs)": 96.50, "Support / TSL (Rs)": 88.50, "Target 1": 105.00, "Target 2": 112.00, "Target 3": 120.00, "Hinglish News & Catalyst Remark": "Capacity expansion & retail distribution push", "Volume Spurt": "2.20x", "Recent Deliv %": "52.8%", "Radar Age": "1 Day"},
-    {"Symbol": "RELIANCE", "Company": "Reliance Industries Ltd.", "Sector": "Oil Gas & Consumable Fuels", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 2980.00, "Smart Money Buy Range (Rs)": "₹2950.00 – ₹2995.00", "CHoCH Trigger (Rs)": 3040.00, "Support / TSL (Rs)": 2910.00, "Target 1": 3180.00, "Target 2": 3280.00, "Target 3": 3400.00, "Hinglish News & Catalyst Remark": "Retail & Telecom cash generation, institutional accumulation", "Volume Spurt": "2.50x", "Recent Deliv %": "63.8%", "Radar Age": "1 Day"}
+    {"Symbol": "CASTROLIND", "Company": "Castrol India Ltd.", "Sector": "Oil Gas & Consumable Fuels", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 199.04, "Buy Range Low": 196.00, "Buy Range High": 201.00, "CHoCH Trigger (Rs)": 204.50, "Support / TSL (Rs)": 191.00, "Target 1": 215.00, "Target 2": 226.00, "Target 3": 240.00, "Hinglish News & Catalyst Remark": "Strong cash delivery, deserve a spot on watchlist", "Volume Spurt": "2.12x", "Recent Deliv %": "57.4%", "Radar Age": "1 Day"},
+    {"Symbol": "AIAENG", "Company": "AIA Engineering Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 3824.40, "Buy Range Low": 3790.00, "Buy Range High": 3845.00, "CHoCH Trigger (Rs)": 3950.00, "Support / TSL (Rs)": 3710.00, "Target 1": 4180.00, "Target 2": 4350.00, "Target 3": 4580.00, "Hinglish News & Catalyst Remark": "Mining consumables order expansion, heavy block deals", "Volume Spurt": "2.25x", "Recent Deliv %": "52.4%", "Radar Age": "1 Day"},
+    {"Symbol": "ANURAS", "Company": "Anuras Chemicals Ltd.", "Sector": "Chemicals", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1163.70, "Buy Range Low": 1150.00, "Buy Range High": 1175.00, "CHoCH Trigger (Rs)": 1195.00, "Support / TSL (Rs)": 1135.00, "Target 1": 1280.00, "Target 2": 1340.00, "Target 3": 1410.00, "Hinglish News & Catalyst Remark": "Specialty chemical demand & base level institutional support", "Volume Spurt": "3.12x", "Recent Deliv %": "58.1%", "Radar Age": "1 Day"},
+    {"Symbol": "ATHERENERG", "Company": "Ather Energy Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1406.10, "Buy Range Low": 1385.00, "Buy Range High": 1420.00, "CHoCH Trigger (Rs)": 1455.00, "Support / TSL (Rs)": 1350.00, "Target 1": 1560.00, "Target 2": 1640.00, "Target 3": 1740.00, "Hinglish News & Catalyst Remark": "EV 2W delivery volume spike at baseline support", "Volume Spurt": "2.05x", "Recent Deliv %": "49.5%", "Radar Age": "1 Day"},
+    {"Symbol": "BAJAJ-AUTO", "Company": "Bajaj Auto Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 10045.00, "Buy Range Low": 9950.00, "Buy Range High": 10120.00, "CHoCH Trigger (Rs)": 10350.00, "Support / TSL (Rs)": 9750.00, "Target 1": 11200.00, "Target 2": 11800.00, "Target 3": 12500.00, "Hinglish News & Catalyst Remark": "Premium 2W exports rise, institutional base building", "Volume Spurt": "2.25x", "Recent Deliv %": "53.0%", "Radar Age": "1 Day"},
+    {"Symbol": "BAJAJFINSV", "Company": "Bajaj Finserv Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1732.60, "Buy Range Low": 1715.00, "Buy Range High": 1745.00, "CHoCH Trigger (Rs)": 1785.00, "Support / TSL (Rs)": 1680.00, "Target 1": 1920.00, "Target 2": 2040.00, "Target 3": 2180.00, "Hinglish News & Catalyst Remark": "Lending & insurance premium growth momentum", "Volume Spurt": "2.35x", "Recent Deliv %": "62.0%", "Radar Age": "1 Day"},
+    {"Symbol": "BAJAJHFL", "Company": "Bajaj Housing Finance Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 82.91, "Buy Range Low": 81.80, "Buy Range High": 83.60, "CHoCH Trigger (Rs)": 86.40, "Support / TSL (Rs)": 79.50, "Target 1": 95.00, "Target 2": 102.00, "Target 3": 110.00, "Hinglish News & Catalyst Remark": "Institutional absorption post-listing consolidation", "Volume Spurt": "2.90x", "Recent Deliv %": "61.2%", "Radar Age": "1 Day"},
+    {"Symbol": "BAJFINANCE", "Company": "Bajaj Finance Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 7250.00, "Buy Range Low": 7180.00, "Buy Range High": 7290.00, "CHoCH Trigger (Rs)": 7450.00, "Support / TSL (Rs)": 7020.00, "Target 1": 7900.00, "Target 2": 8250.00, "Target 3": 8650.00, "Hinglish News & Catalyst Remark": "AUM expansion & consumer finance delivery spurt", "Volume Spurt": "2.70x", "Recent Deliv %": "65.0%", "Radar Age": "1 Day"},
+    {"Symbol": "BEL", "Company": "Bharat Electronics Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 383.10, "Buy Range Low": 380.00, "Buy Range High": 386.00, "CHoCH Trigger (Rs)": 392.50, "Support / TSL (Rs)": 375.00, "Target 1": 416.00, "Target 2": 435.00, "Target 3": 465.00, "Hinglish News & Catalyst Remark": "Defence order book surge, awaiting 15m breakout above 392.5", "Volume Spurt": "2.80x", "Recent Deliv %": "55.4%", "Radar Age": "4 Days"},
+    {"Symbol": "CANBK", "Company": "Canara Bank", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 118.36, "Buy Range Low": 116.50, "Buy Range High": 119.50, "CHoCH Trigger (Rs)": 123.50, "Support / TSL (Rs)": 113.00, "Target 1": 132.00, "Target 2": 142.00, "Target 3": 154.00, "Hinglish News & Catalyst Remark": "PSU Bank credit expansion & low credit cost accumulation", "Volume Spurt": "2.45x", "Recent Deliv %": "57.0%", "Radar Age": "1 Day"},
+    {"Symbol": "COFORGE", "Company": "Coforge Ltd.", "Sector": "Information Technology", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 7850.00, "Buy Range Low": 7780.00, "Buy Range High": 7920.00, "CHoCH Trigger (Rs)": 8080.00, "Support / TSL (Rs)": 7580.00, "Target 1": 8500.00, "Target 2": 8900.00, "Target 3": 9300.00, "Hinglish News & Catalyst Remark": "Midcap IT client deal signing & delivery expansion", "Volume Spurt": "2.30x", "Recent Deliv %": "50.5%", "Radar Age": "1 Day"},
+    {"Symbol": "CUPID", "Company": "Cupid Ltd.", "Sector": "Consumer Durables", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 92.40, "Buy Range Low": 91.00, "Buy Range High": 93.50, "CHoCH Trigger (Rs)": 96.50, "Support / TSL (Rs)": 88.50, "Target 1": 105.00, "Target 2": 112.00, "Target 3": 120.00, "Hinglish News & Catalyst Remark": "Capacity expansion & retail distribution ramp-up", "Volume Spurt": "2.20x", "Recent Deliv %": "52.8%", "Radar Age": "1 Day"},
+    {"Symbol": "EIHOTEL", "Company": "EIH Associated Hotels", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 880.00, "Buy Range Low": 868.00, "Buy Range High": 890.00, "CHoCH Trigger (Rs)": 908.00, "Support / TSL (Rs)": 850.00, "Target 1": 965.00, "Target 2": 1020.00, "Target 3": 1090.00, "Hinglish News & Catalyst Remark": "Hospitality sector inflow shift, delivery build-up", "Volume Spurt": "2.35x", "Recent Deliv %": "55.0%", "Radar Age": "1 Day"},
+    {"Symbol": "ELECTCAST", "Company": "Electrosteel Castings Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 74.54, "Buy Range Low": 73.00, "Buy Range High": 75.50, "CHoCH Trigger (Rs)": 77.80, "Support / TSL (Rs)": 71.50, "Target 1": 84.00, "Target 2": 89.00, "Target 3": 96.00, "Hinglish News & Catalyst Remark": "Brokerage houses se target upgrade & buy call", "Volume Spurt": "2.46x", "Recent Deliv %": "47.4%", "Radar Age": "1 Day"},
+    {"Symbol": "EMAMILTD", "Company": "Emami Ltd.", "Sector": "Fast Moving Consumer Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 372.65, "Buy Range Low": 368.00, "Buy Range High": 375.00, "CHoCH Trigger (Rs)": 386.00, "Support / TSL (Rs)": 361.00, "Target 1": 425.00, "Target 2": 445.00, "Target 3": 470.00, "Hinglish News & Catalyst Remark": "Price rise, lower level valuation support", "Volume Spurt": "2.32x", "Recent Deliv %": "52.9%", "Radar Age": "1 Day"},
+    {"Symbol": "ENTERO", "Company": "Entero Healthcare Solutions", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1145.00, "Buy Range Low": 1130.00, "Buy Range High": 1155.00, "CHoCH Trigger (Rs)": 1175.00, "Support / TSL (Rs)": 1105.00, "Target 1": 1240.00, "Target 2": 1300.00, "Target 3": 1380.00, "Hinglish News & Catalyst Remark": "Healthcare logistics expansion & institutional absorption", "Volume Spurt": "2.65x", "Recent Deliv %": "58.2%", "Radar Age": "1 Day"},
+    {"Symbol": "HDFCBANK", "Company": "HDFC Bank Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1680.00, "Buy Range Low": 1665.00, "Buy Range High": 1692.00, "CHoCH Trigger (Rs)": 1718.00, "Support / TSL (Rs)": 1635.00, "Target 1": 1790.00, "Target 2": 1850.00, "Target 3": 1920.00, "Hinglish News & Catalyst Remark": "Deposit growth uptick, heavy FPI absorption", "Volume Spurt": "3.40x", "Recent Deliv %": "72.1%", "Radar Age": "1 Day"},
+    {"Symbol": "ICICIBANK", "Company": "ICICI Bank Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1285.00, "Buy Range Low": 1272.00, "Buy Range High": 1294.00, "CHoCH Trigger (Rs)": 1315.00, "Support / TSL (Rs)": 1250.00, "Target 1": 1380.00, "Target 2": 1430.00, "Target 3": 1490.00, "Hinglish News & Catalyst Remark": "Strong NIMs stability & sustained institutional delivery", "Volume Spurt": "2.95x", "Recent Deliv %": "69.0%", "Radar Age": "1 Day"},
+    {"Symbol": "IIFLCAPS", "Company": "IIFL Capital Services Ltd.", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 345.60, "Buy Range Low": 340.00, "Buy Range High": 348.00, "CHoCH Trigger (Rs)": 354.00, "Support / TSL (Rs)": 332.00, "Target 1": 375.00, "Target 2": 395.00, "Target 3": 420.00, "Hinglish News & Catalyst Remark": "Institutional block deal / heavy stake accumulation", "Volume Spurt": "2.40x", "Recent Deliv %": "66.4%", "Radar Age": "1 Day"},
+    {"Symbol": "IKS", "Company": "IKS Health", "Sector": "Information Technology", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1420.00, "Buy Range Low": 1400.00, "Buy Range High": 1435.00, "CHoCH Trigger (Rs)": 1465.00, "Support / TSL (Rs)": 1370.00, "Target 1": 1560.00, "Target 2": 1640.00, "Target 3": 1720.00, "Hinglish News & Catalyst Remark": "IT healthcare services steady institutional base", "Volume Spurt": "2.20x", "Recent Deliv %": "48.1%", "Radar Age": "1 Day"},
+    {"Symbol": "INDHOTEL", "Company": "Indian Hotels Co Ltd.", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 718.00, "Buy Range Low": 710.00, "Buy Range High": 724.00, "CHoCH Trigger (Rs)": 738.00, "Support / TSL (Rs)": 698.00, "Target 1": 785.00, "Target 2": 820.00, "Target 3": 855.00, "Hinglish News & Catalyst Remark": "Share price rise 2.2%: valuation and sector rotation positive", "Volume Spurt": "2.40x", "Recent Deliv %": "61.3%", "Radar Age": "1 Day"},
+    {"Symbol": "JKCEMENT", "Company": "JK Cement Ltd.", "Sector": "Construction Materials", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 4350.00, "Buy Range Low": 4310.00, "Buy Range High": 4390.00, "CHoCH Trigger (Rs)": 4465.00, "Support / TSL (Rs)": 4220.00, "Target 1": 4700.00, "Target 2": 4900.00, "Target 3": 5150.00, "Hinglish News & Catalyst Remark": "Capacity commissioning and strong regional pricing", "Volume Spurt": "2.40x", "Recent Deliv %": "63.5%", "Radar Age": "1 Day"},
+    {"Symbol": "KAJARIACER", "Company": "Kajaria Ceramics Ltd.", "Sector": "Consumer Durables", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1225.10, "Buy Range Low": 1210.00, "Buy Range High": 1235.00, "CHoCH Trigger (Rs)": 1255.00, "Support / TSL (Rs)": 1180.00, "Target 1": 1315.00, "Target 2": 1380.00, "Target 3": 1450.00, "Hinglish News & Catalyst Remark": "Fundamentals & sector valuation expansion", "Volume Spurt": "3.10x", "Recent Deliv %": "68.5%", "Radar Age": "1 Day"},
+    {"Symbol": "KOTAKBANK", "Company": "Kotak Mahindra Bank", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1820.00, "Buy Range Low": 1805.00, "Buy Range High": 1835.00, "CHoCH Trigger (Rs)": 1858.00, "Support / TSL (Rs)": 1775.00, "Target 1": 1940.00, "Target 2": 2010.00, "Target 3": 2100.00, "Hinglish News & Catalyst Remark": "Tech embargo resolution benefits & loan growth pickup", "Volume Spurt": "2.75x", "Recent Deliv %": "62.1%", "Radar Age": "1 Day"},
+    {"Symbol": "LENSKART", "Company": "Lenskart Solutions", "Sector": "Consumer Durables", "Sector Alignment": "⚠️️ Sector Outflow", "CMP (Rs)": 385.00, "Buy Range Low": 380.00, "Buy Range High": 389.00, "CHoCH Trigger (Rs)": 398.00, "Support / TSL (Rs)": 368.00, "Target 1": 430.00, "Target 2": 455.00, "Target 3": 485.00, "Hinglish News & Catalyst Remark": "Retail expansion footprint & strong offline same-store sales", "Volume Spurt": "2.85x", "Recent Deliv %": "64.0%", "Radar Age": "1 Day"},
+    {"Symbol": "NATCOPHARM", "Company": "Natco Pharma Ltd.", "Sector": "Healthcare", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 1410.00, "Buy Range Low": 1395.00, "Buy Range High": 1425.00, "CHoCH Trigger (Rs)": 1450.00, "Support / TSL (Rs)": 1365.00, "Target 1": 1540.00, "Target 2": 1620.00, "Target 3": 1700.00, "Hinglish News & Catalyst Remark": "US generic approvals and steady formulation cash flows", "Volume Spurt": "2.85x", "Recent Deliv %": "61.0%", "Radar Age": "1 Day"},
+    {"Symbol": "PNCINFRA", "Company": "PNC Infratech Ltd.", "Sector": "Construction", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 138.16, "Buy Range Low": 136.00, "Buy Range High": 139.50, "CHoCH Trigger (Rs)": 143.90, "Support / TSL (Rs)": 128.40, "Target 1": 152.00, "Target 2": 162.00, "Target 3": 175.00, "Hinglish News & Catalyst Remark": "Brokerage houses se target upgrade & heavy buying pressure", "Volume Spurt": "3.77x", "Recent Deliv %": "45.4%", "Radar Age": "1 Day"},
+    {"Symbol": "SANSERA", "Company": "Sansera Engineering Ltd.", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 1320.00, "Buy Range Low": 1305.00, "Buy Range High": 1335.00, "CHoCH Trigger (Rs)": 1358.00, "Support / TSL (Rs)": 1275.00, "Target 1": 1430.00, "Target 2": 1500.00, "Target 3": 1580.00, "Hinglish News & Catalyst Remark": "EV aerospace components order book expansion", "Volume Spurt": "2.45x", "Recent Deliv %": "46.7%", "Radar Age": "1 Day"},
+    {"Symbol": "SHREECEM", "Company": "Shree Cement Ltd.", "Sector": "Construction Materials", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 21900.00, "Buy Range Low": 21700.00, "Buy Range High": 22100.00, "CHoCH Trigger (Rs)": 22650.00, "Support / TSL (Rs)": 21350.00, "Target 1": 23800.00, "Target 2": 24900.00, "Target 3": 26200.00, "Hinglish News & Catalyst Remark": "Share Price Near Low With Mixed Valuation, institutional accumulation", "Volume Spurt": "3.47x", "Recent Deliv %": "51.9%", "Radar Age": "1 Day"},
+    {"Symbol": "SHRIPISTON", "Company": "Shriram Pistons & Rings", "Sector": "Automobile and Auto Components", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 2040.00, "Buy Range Low": 2015.00, "Buy Range High": 2060.00, "CHoCH Trigger (Rs)": 2110.00, "Support / TSL (Rs)": 1965.00, "Target 1": 2240.00, "Target 2": 2350.00, "Target 3": 2480.00, "Hinglish News & Catalyst Remark": "Strong cash delivery absorption at support band", "Volume Spurt": "2.15x", "Recent Deliv %": "54.2%", "Radar Age": "1 Day"},
+    {"Symbol": "STARHEALTH", "Company": "Star Health and Allied Insurance", "Sector": "Financial Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 537.70, "Buy Range Low": 530.00, "Buy Range High": 542.00, "CHoCH Trigger (Rs)": 558.00, "Support / TSL (Rs)": 513.00, "Target 1": 595.00, "Target 2": 625.00, "Target 3": 660.00, "Hinglish News & Catalyst Remark": "Pullback support level hold kar raha hai, delivery 59.6%", "Volume Spurt": "4.77x", "Recent Deliv %": "59.6%", "Radar Age": "1 Day"},
+    {"Symbol": "VESUVIUS", "Company": "Vesuvius India Ltd.", "Sector": "Capital Goods", "Sector Alignment": "⚠️ Sector Outflow", "CMP (Rs)": 404.10, "Buy Range Low": 398.00, "Buy Range High": 408.00, "CHoCH Trigger (Rs)": 422.00, "Support / TSL (Rs)": 388.00, "Target 1": 465.00, "Target 2": 495.00, "Target 3": 530.00, "Hinglish News & Catalyst Remark": "REG - American Century Inv Vesuvius plc Form 8.3 heavy stake filing", "Volume Spurt": "2.55x", "Recent Deliv %": "48.9%", "Radar Age": "1 Day"},
+    {"Symbol": "WESTLIFE", "Company": "Westlife Foodworld Ltd.", "Sector": "Consumer Services", "Sector Alignment": "☑️ Inflow Aligned", "CMP (Rs)": 588.05, "Buy Range Low": 580.00, "Buy Range High": 594.00, "CHoCH Trigger (Rs)": 605.00, "Support / TSL (Rs)": 568.00, "Target 1": 645.00, "Target 2": 680.00, "Target 3": 720.00, "Hinglish News & Catalyst Remark": "Institutional block deal / heavy stake accumulation", "Volume Spurt": "2.18x", "Recent Deliv %": "49.9%", "Radar Age": "1 Day"}
 ]
 
-# DYNAMIC SMC STRUCTURE & EXECUTION RULES LOGIC
-active_portfolio_tickers = [t["Ticker"] for t in st.session_state.trades]
-
+# ==========================================
+# 3. DYNAMIC STATUS & TRIGGER CALCULATOR
+# ==========================================
+processed_stocks = []
 for item in EXCEL_ACCUMULATION_RAW:
-    sym = item["Symbol"]
-    cmp_val = item["CMP (Rs)"]
-    choch_val = item["CHoCH Trigger (Rs)"]
+    row = item.copy()
+    cmp = row["CMP (Rs)"]
+    choch = row["CHoCH Trigger (Rs)"]
+    b_low = row["Buy Range Low"]
+    b_high = row["Buy Range High"]
     
-    # Check if stock is actively entered by user
-    if sym in active_portfolio_tickers:
-        item["Live Status"] = "⚡ ACTIVE HOLD"
-        item["Trade Action"] = "ENTERED"
-        item["SMC Structure"] = "🚀 CONFIRMED CHoCH (BUY)"
-        item["Trade Signal"] = "🟢 HOLD & RIDE (SL Active)"
+    # Range String Format for Display
+    row["Smart Money Buy Range (Rs)"] = f"₹{b_low:.2f} – ₹{b_high:.2f}"
+    
+    # STRICT INSTITUTIONAL EXECUTION RULE:
+    # Entry sirf tabhi valid hoti hai jab CMP >= CHoCH Trigger ho
+    if cmp >= choch:
+        row["Live Status"] = "⚡ ACTIVE"
+        row["Trade Action"] = "ACT: ENTERED"
+        row["SMC Structure"] = "CONFIRMED CHoCH (BUY)"
+        row["Trade Signal"] = "BUY TRIGGER CONFIRMED"
+    elif b_low <= cmp <= b_high:
+        row["Live Status"] = "🟢 IN ACCUMULATION"
+        row["Trade Action"] = "NEW WATCHLIST"
+        row["SMC Structure"] = "⌛ ABSORPTION (WAIT)"
+        row["Trade Signal"] = "WAIT FOR CHoCH TRIGGER"
     else:
-        # Stock not entered yet: Evaluate purely against CHoCH Trigger
-        if cmp_val >= choch_val:
-            item["Live Status"] = "🚀 BREAKOUT ACTIVE"
-            item["Trade Action"] = "READY TO BUY"
-            item["SMC Structure"] = "🚀 CHoCH CONFIRMED (BUY)"
-            item["Trade Signal"] = "⚡ 15m Breakout Confirmed (Trigger Cross)"
-        else:
-            item["Live Status"] = "🟢 NEW ENTRY"
-            item["Trade Action"] = "WATCHLIST"
-            item["SMC Structure"] = "⌛ ABSORPTION (WAIT)"
-            item["Trade Signal"] = "WAIT FOR CHoCH TRIGGER"
+        row["Live Status"] = "⚪ TRACKING"
+        row["Trade Action"] = "NEW WATCHLIST"
+        row["SMC Structure"] = "⌛ ABSORPTION (WAIT)"
+        row["Trade Signal"] = "WAIT FOR CHoCH TRIGGER"
+        
+    processed_stocks.append(row)
 
-# AUTOMATIC SORTING: ACTIVE HOLD AT TOP + SEQUENTIAL S.NO.
-sorted_raw = sorted(EXCEL_ACCUMULATION_RAW, key=lambda x: (x["Live Status"] != "⚡ ACTIVE HOLD", x["Symbol"]))
-RADAR_MASTER = []
-for idx, item in enumerate(sorted_raw, start=1):
-    row_copy = {"S.No.": idx, "Report Date": "01-Oct-2026"}
-    row_copy.update(item)
-    RADAR_MASTER.append(row_copy)
+df_terminal = pd.DataFrame(processed_stocks)
 
 # ==========================================
-# 4. 6 FORTNIGHTS SECTOR FLOW
+# 4. EXCEL EXPORT BUILDER (EXACT STYLING)
 # ==========================================
-FORTNIGHT_SECTORS = [
-    {"S.No.": 1, "SECTOR": "Financial Services", "Recent 12D Share (%)": 29.01, "3M Base Share (%)": 26.50, "Flow Shift (%)": 2.51, "Flow Signal": "🟢 Heavy Inflow", "16-Sep to 30-Sep-2026": 4250, "01-Sep to 15-Sep-2026": 3100, "16-Aug to 31-Aug-2026": 2200, "01-Aug to 15-Aug-2026": 1850, "16-Jul to 31-Jul-2026": 1200, "01-Jul to 15-Jul-2026": 950},
-    {"S.No.": 2, "SECTOR": "Healthcare", "Recent 12D Share (%)": 8.13, "3M Base Share (%)": 7.45, "Flow Shift (%)": 0.68, "Flow Signal": "🟢 Heavy Inflow", "16-Sep to 30-Sep-2026": 1650, "01-Sep to 15-Sep-2026": 1400, "16-Aug to 31-Aug-2026": 1100, "01-Aug to 15-Aug-2026": 950, "16-Jul to 31-Jul-2026": 800, "01-Jul to 15-Jul-2026": 600},
-    {"S.No.": 3, "SECTOR": "Construction Materials", "Recent 12D Share (%)": 1.23, "3M Base Share (%)": 1.14, "Flow Shift (%)": 0.09, "Flow Signal": "🟢 Inflow", "16-Sep to 30-Sep-2026": 750, "01-Sep to 15-Sep-2026": 620, "16-Aug to 31-Aug-2026": 450, "01-Aug to 15-Aug-2026": 380, "16-Jul to 31-Jul-2026": 290, "01-Jul to 15-Jul-2026": 210},
-    {"S.No.": 4, "SECTOR": "Power", "Recent 12D Share (%)": 3.03, "3M Base Share (%)": 2.97, "Flow Shift (%)": 0.06, "Flow Signal": "🟢 Inflow", "16-Sep to 30-Sep-2026": 890, "01-Sep to 15-Sep-2026": 820, "16-Aug to 31-Aug-2026": 750, "01-Aug to 15-Aug-2026": 690, "16-Jul to 31-Jul-2026": 500, "01-Jul to 15-Jul-2026": 420},
-    {"S.No.": 5, "SECTOR": "Consumer Services", "Recent 12D Share (%)": 5.86, "3M Base Share (%)": 5.81, "Flow Shift (%)": 0.05, "Flow Signal": "🟢 Inflow", "16-Sep to 30-Sep-2026": 1200, "01-Sep to 15-Sep-2026": 1150, "16-Aug to 31-Aug-2026": 980, "01-Aug to 15-Aug-2026": 850, "16-Jul to 31-Jul-2026": 720, "01-Jul to 15-Jul-2026": 600},
-    {"S.No.": 6, "SECTOR": "Oil Gas & Consumable Fuels", "Recent 12D Share (%)": 4.74, "3M Base Share (%)": 4.69, "Flow Shift (%)": 0.05, "Flow Signal": "🟢 Inflow", "16-Sep to 30-Sep-2026": 950, "01-Sep to 15-Sep-2026": 900, "16-Aug to 31-Aug-2026": 820, "01-Aug to 15-Aug-2026": 790, "16-Jul to 31-Jul-2026": 650, "01-Jul to 15-Jul-2026": 500},
-    {"S.No.": 7, "SECTOR": "Construction", "Recent 12D Share (%)": 1.62, "3M Base Share (%)": 1.59, "Flow Shift (%)": 0.03, "Flow Signal": "🟢 Inflow", "16-Sep to 30-Sep-2026": 420, "01-Sep to 15-Sep-2026": 390, "16-Aug to 31-Aug-2026": 350, "01-Aug to 15-Aug-2026": 300, "16-Jul to 31-Jul-2026": 240, "01-Jul to 15-Jul-2026": 180},
-    {"S.No.": 8, "SECTOR": "Forest Materials", "Recent 12D Share (%)": 0.02, "3M Base Share (%)": 0.02, "Flow Shift (%)": 0.00, "Flow Signal": "🟡 Outflow", "16-Sep to 30-Sep-2026": -15, "01-Sep to 15-Sep-2026": 5, "16-Aug to 31-Aug-2026": 10, "01-Aug to 15-Aug-2026": -8, "16-Jul to 31-Jul-2026": 12, "01-Jul to 15-Jul-2026": 20},
-    {"S.No.": 9, "SECTOR": "Diversified", "Recent 12D Share (%)": 0.01, "3M Base Share (%)": 0.02, "Flow Shift (%)": -0.01, "Flow Signal": "🟡 Outflow", "16-Sep to 30-Sep-2026": -45, "01-Sep to 15-Sep-2026": -30, "16-Aug to 31-Aug-2026": 15, "01-Aug to 15-Aug-2026": 20, "16-Jul to 31-Jul-2026": -10, "01-Jul to 15-Jul-2026": 5},
-    {"S.No.": 10, "SECTOR": "Textiles", "Recent 12D Share (%)": 0.38, "3M Base Share (%)": 0.39, "Flow Shift (%)": -0.01, "Flow Signal": "🟡 Outflow", "16-Sep to 30-Sep-2026": -85, "01-Sep to 15-Sep-2026": -60, "16-Aug to 31-Aug-2026": -20, "01-Aug to 15-Aug-2026": 40, "16-Jul to 31-Jul-2026": 50, "01-Jul to 15-Jul-2026": 80},
-    {"S.No.": 11, "SECTOR": "Media Entertainment & Publication", "Recent 12D Share (%)": 0.42, "3M Base Share (%)": 0.45, "Flow Shift (%)": -0.03, "Flow Signal": "🔴 Outflow", "16-Sep to 30-Sep-2026": -140, "01-Sep to 15-Sep-2026": -110, "16-Aug to 31-Aug-2026": -80, "01-Aug to 15-Aug-2026": -50, "16-Jul to 31-Jul-2026": 20, "01-Jul to 15-Jul-2026": 60},
-    {"S.No.": 12, "SECTOR": "Chemicals", "Recent 12D Share (%)": 2.50, "3M Base Share (%)": 2.56, "Flow Shift (%)": -0.06, "Flow Signal": "🔴 Outflow", "16-Sep to 30-Sep-2026": -520, "01-Sep to 15-Sep-2026": -410, "16-Aug to 31-Aug-2026": -290, "01-Aug to 15-Aug-2026": -150, "16-Jul to 31-Jul-2026": 100, "01-Jul to 15-Jul-2026": 220},
-    {"S.No.": 13, "SECTOR": "Utilities", "Recent 12D Share (%)": 0.12, "3M Base Share (%)": 0.21, "Flow Shift (%)": -0.09, "Flow Signal": "🔴 Outflow", "16-Sep to 30-Sep-2026": -260, "01-Sep to 15-Sep-2026": -210, "16-Aug to 31-Aug-2026": -150, "01-Aug to 15-Aug-2026": -80, "16-Jul to 31-Jul-2026": 40, "01-Jul to 15-Jul-2026": 90},
-    {"S.No.": 14, "SECTOR": "Telecommunication", "Recent 12D Share (%)": 2.88, "3M Base Share (%)": 2.99, "Flow Shift (%)": -0.11, "Flow Signal": "🔴 Outflow", "16-Sep to 30-Sep-2026": -890, "01-Sep to 15-Sep-2026": -750, "16-Aug to 31-Aug-2026": -540, "01-Aug to 15-Aug-2026": -320, "16-Jul to 31-Jul-2026": 150, "01-Jul to 15-Jul-2026": 300}
-]
-
-# 5. EXITED STOCKS LOG
-RAW_EXITS = [
-    {"Symbol": "WHIRLPOOL", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 861.65, "Recent Return (%)": 17.75, "Last Spurt Ratio": 3.23, "Hinglish Exit Reason": "🎯 Target Hit / Breakout Complete (+17.8% move aa gaya)"},
-    {"Symbol": "GNFC", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 589.15, "Recent Return (%)": 9.15, "Last Spurt Ratio": 2.19, "Hinglish Exit Reason": "⚠️ Delivery percentage threshold se niche chala gaya"},
-    {"Symbol": "COHANCE", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 451.30, "Recent Return (%)": 4.24, "Last Spurt Ratio": 1.28, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 1.28x par gir gaya)"},
-    {"Symbol": "KSCL", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 715.10, "Recent Return (%)": 3.57, "Last Spurt Ratio": 2.72, "Hinglish Exit Reason": "⚠️ Delivery percentage threshold se niche chala gaya"},
-    {"Symbol": "BANDHANBNK", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 176.00, "Recent Return (%)": 2.03, "Last Spurt Ratio": 1.25, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 1.25x par gir gaya)"},
-    {"Symbol": "SAILIFE", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 1541.20, "Recent Return (%)": 0.14, "Last Spurt Ratio": 0.82, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 0.82x par gir gaya)"},
-    {"Symbol": "KEI", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 4502.00, "Recent Return (%)": -0.09, "Last Spurt Ratio": 0.74, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 0.74x par gir gaya)"},
-    {"Symbol": "SARDAEN", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 494.75, "Recent Return (%)": -0.52, "Last Spurt Ratio": 0.75, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 0.75x par gir gaya)"},
-    {"Symbol": "GSFC", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 146.90, "Recent Return (%)": -1.52, "Last Spurt Ratio": 0.93, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 0.93x par gir gaya)"},
-    {"Symbol": "BLACKBUCK", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 606.15, "Recent Return (%)": -2.08, "Last Spurt Ratio": 1.37, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 1.37x par gir gaya)"},
-    {"Symbol": "UBL", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 1188.80, "Recent Return (%)": -3.14, "Last Spurt Ratio": 1.09, "Hinglish Exit Reason": "📉 Volume Spurt khatam hua (Spurt 1.09x par gir gaya)"},
-    {"Symbol": "CONCORDBIO", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 1374.10, "Recent Return (%)": -5.48, "Last Spurt Ratio": 1.03, "Hinglish Exit Reason": "🛑 Support Broken / Structure Fail (-5.5% drawdown)"},
-    {"Symbol": "ONESOURCE", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 1508.00, "Recent Return (%)": -5.55, "Last Spurt Ratio": 0.93, "Hinglish Exit Reason": "🛑 Support Broken / Structure Fail (-5.5% drawdown)"},
-    {"Symbol": "LICHSGFIN", "Exit Date": "25-Sep-2026", "Current Price (Rs)": 509.00, "Recent Return (%)": -6.26, "Last Spurt Ratio": 1.24, "Hinglish Exit Reason": "🛑 Support Broken / Structure Fail (-6.3% drawdown)"}
-]
-
-EXITED_STOCKS = [{"S.No.": i+1, **row} for i, row in enumerate(RAW_EXITS)]
-
-# Professional Excel Generator
-def generate_bot_styled_excel():
+def generate_excel_export(df):
     wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+    ws = wb.active
+    ws.title = "SMC_Accumulation_Radar"
+    
+    export_cols = [
+        "Symbol", "Company", "Sector", "CMP (Rs)", "Smart Money Buy Range (Rs)",
+        "CHoCH Trigger (Rs)", "Support / TSL (Rs)", "Target 1", "Target 2", "Target 3",
+        "Volume Spurt", "Recent Deliv %", "Radar Age", "Live Status", "Trade Action", "SMC Structure"
+    ]
+    
+    ws.append(export_cols)
+    
+    header_fill = PatternFill(start_color="161B22", end_color="161B22", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    
+    for col_num, col_name in enumerate(export_cols, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        
+    for r_idx, row_data in df.iterrows():
+        row_vals = [row_data[c] for c in export_cols]
+        ws.append(row_vals)
+        current_row = r_idx + 2
+        
+        # Color coding rows based on active trigger
+        is_entered = row_data["Trade Action"] == "ACT: ENTERED"
+        row_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") if is_entered else None
+        
+        for col_num in range(1, len(export_cols) + 1):
+            cell = ws.cell(row=current_row, column=col_num)
+            if row_fill:
+                cell.fill = row_fill
+            cell.alignment = Alignment(vertical="center")
 
-    C_NAVY = "0F172A"
-    C_WHITE = "FFFFFF"
-    C_BORDER = "CBD5E1"
-    C_CARD = "F8FAFC"
-
-    font_family = "Times New Roman"
-    title_font = Font(name=font_family, size=14, bold=True, color=C_NAVY)
-    header_font = Font(name=font_family, size=12, bold=True, color=C_WHITE)
-    data_font = Font(name=font_family, size=11, bold=False, color="000000")
-
-    thin_side = Side(style='thin', color=C_BORDER)
-    grid_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
-
-    # Sheet 1
-    ws1 = wb.create_sheet(title="Top_Accumulation_Radar")
-    ws1.views.sheetView[0].showGridLines = True
-    ws1.merge_cells("A1:S1")
-    ws1["A1"].value = "INSTITUTIONAL ACCUMULATION & SMC BREAKOUT RADAR"
-    ws1["A1"].font = title_font
-    ws1["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws1["A1"].fill = PatternFill(start_color=C_CARD, end_color=C_CARD, fill_type="solid")
-
-    headers1 = list(RADAR_MASTER[0].keys())
-    for col_i, h in enumerate(headers1, 1):
-        c = ws1.cell(row=3, column=col_i, value=h)
-        c.font = header_font
-        c.fill = PatternFill(start_color=C_NAVY, end_color=C_NAVY, fill_type="solid")
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = grid_border
-
-    for r_i, r_data in enumerate(RADAR_MASTER, 4):
-        for c_i, key in enumerate(headers1, 1):
-            val = r_data[key]
-            cell = ws1.cell(row=r_i, column=c_i, value=val)
-            cell.font = data_font
-            cell.border = grid_border
-
-    # Sheet 2
-    ws2 = wb.create_sheet(title="Sector_Rotation")
-    headers2 = list(FORTNIGHT_SECTORS[0].keys())
-    for col_i, h in enumerate(headers2, 1):
-        c = ws2.cell(row=2, column=col_i, value=h)
-        c.font = header_font
-        c.fill = PatternFill(start_color=C_NAVY, end_color=C_NAVY, fill_type="solid")
-        c.border = grid_border
-
-    for r_i, r_data in enumerate(FORTNIGHT_SECTORS, 3):
-        for c_i, key in enumerate(headers2, 1):
-            val = r_data[key]
-            cell = ws2.cell(row=r_i, column=c_i, value=val)
-            cell.font = data_font
-            cell.border = grid_border
-
-    # Sheet 3
-    ws3 = wb.create_sheet(title="Exited_Stocks_Log")
-    headers3 = list(EXITED_STOCKS[0].keys())
-    for col_i, h in enumerate(headers3, 1):
-        c = ws3.cell(row=2, column=col_i, value=h)
-        c.font = header_font
-        c.fill = PatternFill(start_color="334155", end_color="334155", fill_type="solid")
-        c.border = grid_border
-
-    for r_i, r_data in enumerate(EXITED_STOCKS, 3):
-        for c_i, key in enumerate(headers3, 1):
-            val = r_data[key]
-            cell = ws3.cell(row=r_i, column=c_i, value=val)
-            cell.font = data_font
-            cell.border = grid_border
-
-    for ws in [ws1, ws2, ws3]:
-        for col_idx in range(1, ws.max_column + 1):
-            col_letter = get_column_letter(col_idx)
-            ws.column_dimensions[col_letter].width = 20
-
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        col_letter = get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+        
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
 
 # ==========================================
-# SIDEBAR NAVIGATION & SEARCH
+# 5. UI DISPLAY & DASHBOARD
 # ==========================================
-st.sidebar.markdown("### ⚡ Terminal Core")
+st.title("⚡ Institutional Smart Money Terminal")
+st.markdown(f"**Last Sync:** `{st.session_state.last_refresh_dt}` | **Market Regime:** `{regime_title}` ({regime_sub})")
 
-if st.sidebar.button("🏠 Home / Reset View", use_container_width=True):
-    st.session_state["search_query_val"] = ""
-    st.rerun()
-
-search_candidates = [f"{comp} ({ticker})" for comp, ticker in sorted(NSE_DIRECTORY.items())]
-user_stock_selection = st.sidebar.selectbox(
-    "🔍 Search Any NSE EQ Stock",
-    options=[""] + search_candidates,
-    index=0,
-    key="search_query_val",
-    placeholder="Type stock or company name..."
-)
-
-searched_symbol = None
-if user_stock_selection:
-    searched_symbol = user_stock_selection.split("(")[-1].replace(")", "").strip()
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Last Sync Date & Time:**")
-st.sidebar.info(f"🕒 {st.session_state.last_refresh_dt}")
-
-if st.sidebar.button("🔒 Logout", use_container_width=True):
-    st.session_state["authenticated"] = False
-    st.rerun()
-
-# HEADER
-head_col, action_col = st.columns([3, 2])
-with head_col:
-    st.title("SMART MONEY SWING TERMINAL")
-    st.caption(f"NSE Cash EQ | FPI Rotation & Delivery Spurt | Sync: {st.session_state.last_refresh_dt}")
-
-with action_col:
-    act1, act2 = st.columns(2)
-    with act1:
-        if st.button("🔄 Refresh Data", use_container_width=True):
-            st.cache_data.clear()
-            st.session_state.last_refresh_dt = get_current_ist_str()
-            st.rerun()
-    with act2:
-        xlsx_buffer = generate_bot_styled_excel()
-        st.download_button(
-            label="📥 Download Excel (.xlsx)",
-            data=xlsx_buffer,
-            file_name=f"SmartMoney_Live_Dashboard_{datetime.date.today()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-
-# DYNAMIC REGIME & ACCUMULATION SUMMARY METRICS
-total_active_setups = len(RADAR_MASTER)
-
+# Summary Metrics Bar
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Market Regime (Live)", regime_title, regime_sub)
-m2.metric("Leading Sector", "Financial Services (+2.51%)", "Heavy Inflow Shift")
-m3.metric("CHoCH Radar", f"{total_active_setups} Bull Setups", f"Total Tracked: {total_active_setups} Stocks")
-m4.metric("Active Book", f"{len(st.session_state.trades)} Open Swings", "Dynamic TSL Active")
+total_stocks = len(df_terminal)
+entered_stocks = len(df_terminal[df_terminal["Trade Action"] == "ACT: ENTERED"])
+waiting_stocks = len(df_terminal[df_terminal["Trade Action"] == "NEW WATCHLIST"])
+inflow_aligned = len(df_terminal[df_terminal["Sector Alignment"].str.contains("Inflow", na=False)])
+
+m1.metric("Tracked Stocks", total_stocks)
+m2.metric("CHoCH Triggered", entered_stocks)
+m3.metric("Absorption (Wait)", waiting_stocks)
+m4.metric("Inflow Aligned", inflow_aligned)
+
 st.markdown("---")
 
-# ==========================================
-# GROWW-STYLE DELIVERY VOLUME PERCENTAGE CARD
-# ==========================================
-if searched_symbol:
-    st.markdown(f"## 📦 Delivery Volume & Institutional Action: **{user_stock_selection}**")
-    stock_radar_match = next((x for x in RADAR_MASTER if x["Symbol"] == searched_symbol), None)
+tab1, tab2 = st.tabs(["📊 Live Accumulation Radar", "📥 Export & Reports"])
 
-    try:
-        t_inst = yf.Ticker(f"{searched_symbol}.NS")
-        hist = t_inst.history(period="1mo", interval="1d")
-        if not hist.empty:
-            c_price = round(hist['Close'].iloc[-1], 2)
-            p_price = round(hist['Close'].iloc[-2], 2) if len(hist) > 1 else c_price
-            p_chg = round(((c_price - p_price) / p_price) * 100, 2)
-            d_vol = int(hist['Volume'].iloc[-1])
-            avg_vol20 = int(hist['Volume'].tail(20).mean())
-            spurt = round(d_vol / avg_vol20, 2) if avg_vol20 > 0 else 1.0
-            turnover_cr = round((d_vol * c_price) / 10000000, 2)
-
-            daily_deliv_pct = float(stock_radar_match["Recent Deliv %"].replace("%", "")) if stock_radar_match else 52.4
-            weekly_deliv_pct = round(daily_deliv_pct * 0.96, 1)
-
-            d1, d2, d3, d4, d5 = st.columns(5)
-            d1.metric("NSE CMP (Cash)", f"₹{c_price}", f"{'+' if p_chg >= 0 else ''}{p_chg}% Today")
-            d2.metric("Daily Delivery %", f"{daily_deliv_pct}%", "Institutional Utthaan")
-            d3.metric("12D Avg Delivery %", f"{weekly_deliv_pct}%", "Base Absorption")
-            d4.metric("Volume Spurt", f"{spurt}x Avg", f"₹{turnover_cr} Cr Traded")
-            d5.metric("Setup Status", stock_radar_match["Live Status"] if stock_radar_match else "NSE Traded", "Radar Verified")
-
-            if stock_radar_match:
-                st.info(f"💡 **Smart Money Buy Range:** `{stock_radar_match['Smart Money Buy Range (Rs)']}` | **CHoCH Trigger:** ₹{stock_radar_match['CHoCH Trigger (Rs)']} | **Support / SL:** ₹{stock_radar_match['Support / TSL (Rs)']} | **Structural Targets:** ₹{stock_radar_match['Target 1']}, ₹{stock_radar_match['Target 2']}, ₹{stock_radar_match['Target 3']}")
-            st.markdown("---")
-    except Exception as e:
-        st.warning(f"Live data update notice: {e}")
-
-# ==========================================
-# MAIN TERMINAL TABS
-# ==========================================
-tab0, tab1, tab2, tab3, tab4 = st.tabs([
-    "🏠 Home / Executive Overview",
-    "🎯 Institutional Accumulation Radar",
-    "💼 Active Swing Portfolio",
-    "🌐 6-Fortnights Sector Rotation",
-    "📜 Exited Stocks Audit Log"
-])
-
-# TAB 0: HOME
-with tab0:
-    st.subheader("⚡ Institutional Capital Flow & Swing Framework")
-    st.write("""
-    **Core Execution Protocol:**
-    1. **Sector Alignment:** Fortnightly institutional capital rotation shift $\ge$ +0.5%.
-    2. **Cash Delivery Absorption:** Delivery Spurt $\ge$ 2.0x base average + 45%+ Delivery Percentage.
-    3. **Smart Money Range:** Accumulate strictly in the Discount Order Block range.
-    4. **15m CHoCH Execution:** Breakout confirmation strictly when price sustains above the CHoCH trigger.
-    """)
-    st.success(f"✅ Smart Money Bot Engine Synchronized | Total Active Tracked Stocks: {total_active_setups}")
-
-# TAB 1: RADAR (ACTIVE HOLD AT TOP + SEQUENTIAL S.NO.)
 with tab1:
-    st.subheader(f"🎯 Institutional Accumulation Radar (Showing {total_active_setups} Setups)")
-    st.caption("Active Hold setups automatic rank at top | Pure Delivery Spurt + Base Absorption + Smart Money Buy Range & 3 Structural Targets")
-    st.dataframe(pd.DataFrame(RADAR_MASTER), use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("⚡ 1-Click: Radar se Direct Active Swing Portfolio me Add Karein")
-    r1, r2 = st.columns([3, 1])
-    with r1:
-        chosen_radar = st.selectbox("Select Setup:", [f"{item['Symbol']} - {item['Company']} (CMP: ₹{item['CMP (Rs)']})" for item in RADAR_MASTER])
-    with r2:
-        if st.button("📥 Add to Active Swing Book", type="primary", use_container_width=True):
-            r_sym = chosen_radar.split(" - ")[0].strip()
-            matched = next((item for item in RADAR_MASTER if item["Symbol"] == r_sym), None)
-            if matched:
-                st.session_state.trades.append({
-                    "Ticker": matched["Symbol"],
-                    "Sector": matched["Sector"],
-                    "Entry": matched["CMP (Rs)"],
-                    "SL": matched["Support / TSL (Rs)"],
-                    "Target 1": matched["Target 1"],
-                    "Target 2": matched["Target 2"],
-                    "Target 3": matched["Target 3"],
-                    "Date": str(datetime.date.today())
-                })
-                save_trades(st.session_state.trades)
-                st.success(f"{r_sym} added to Active Book!")
-                st.rerun()
-
-# TAB 2: ACTIVE PORTFOLIO
-with tab2:
-    st.subheader("💼 Active Swing Book & Dynamic Trailing Stop-Loss")
-    st.caption("Rule: +2% Gain = Move SL to Cost (Zero Risk) | +5% Gain = Lock +2.5% Profit")
-
-    if not st.session_state.trades:
-        st.info("ℹ️ Abhi koi position open nahi hai. Radar tab me se 1-Click karke trade add karein.")
-    else:
-        port_rows = []
-        for item in st.session_state.trades:
-            sym = item["Ticker"]
-            entry = float(item["Entry"])
-            orig_sl = float(item["SL"])
-            t1 = float(item.get("Target 1", entry * 1.08))
-            t2 = float(item.get("Target 2", entry * 1.15))
-            t3 = float(item.get("Target 3", entry * 1.25))
-            
-            try:
-                t_data = yf.Ticker(f"{sym}.NS")
-                hist = t_data.history(period="2d", interval="1d")
-                cmp_price = round(hist['Close'].iloc[-1], 2) if not hist.empty else entry
-            except Exception:
-                cmp_price = entry
-
-            pnl_pct = round(((cmp_price - entry) / entry) * 100, 2)
-            
-            if pnl_pct >= 5.0:
-                trailing_sl = round(entry * 1.025, 2)
-                rule_status = "🚀 Profit Locked (+2.5%)"
-            elif pnl_pct >= 2.0:
-                trailing_sl = entry
-                rule_status = "🔒 Moved to Cost (Zero Risk)"
-            else:
-                trailing_sl = orig_sl
-                rule_status = "🛡️ Initial Stop-Loss Active"
-
-            port_rows.append({
-                "Ticker": sym,
-                "Sector": item.get("Sector", "NSE EQ"),
-                "Entry (₹)": entry,
-                "CMP (₹)": cmp_price,
-                "P&L (%)": f"{'+' if pnl_pct >= 0 else ''}{pnl_pct}%",
-                "Trailing SL (₹)": trailing_sl,
-                "Target 1 (₹)": t1,
-                "Target 2 (₹)": t2,
-                "Target 3 (₹)": t3,
-                "Execution Rule": rule_status
-            })
-
-        st.dataframe(pd.DataFrame(port_rows), use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    c_m1, c_m2 = st.columns(2)
-    with c_m1:
-        with st.expander("➕ Manual Entry: Custom Swing Trade"):
-            with st.form("add_form"):
-                in_sym = st.selectbox("Stock", sorted(NSE_DIRECTORY.values()))
-                in_sec = st.text_input("Sector", value="NSE Cash EQ")
-                in_entry = st.number_input("Entry (₹)", min_value=1.0, value=100.0, step=0.5)
-                in_sl = st.number_input("SL (₹)", min_value=1.0, value=95.0, step=0.5)
-                in_t1 = st.number_input("Target 1 (₹)", min_value=1.0, value=108.0, step=0.5)
-                in_t2 = st.number_input("Target 2 (₹)", min_value=1.0, value=115.0, step=0.5)
-                in_t3 = st.number_input("Target 3 (₹)", min_value=1.0, value=125.0, step=0.5)
-                if st.form_submit_button("Confirm Entry") and in_sym:
-                    st.session_state.trades.append({
-                        "Ticker": in_sym, "Sector": in_sec, "Entry": float(in_entry),
-                        "SL": float(in_sl), "Target 1": float(in_t1), "Target 2": float(in_t2),
-                        "Target 3": float(in_t3), "Date": str(datetime.date.today())
-                    })
-                    save_trades(st.session_state.trades)
-                    st.success(f"{in_sym} added!")
-                    st.rerun()
-
-    with c_m2:
-        with st.expander("🗑️ Close / Exit Position"):
-            t_names = [t["Ticker"] for t in st.session_state.trades]
-            if t_names:
-                sel_exit = st.selectbox("Select Trade", t_names)
-                if st.button("Close Position", type="primary"):
-                    st.session_state.trades = [t for t in st.session_state.trades if t["Ticker"] != sel_exit]
-                    save_trades(st.session_state.trades)
-                    st.success(f"Position {sel_exit} closed!")
-                    st.rerun()
-            else:
-                st.write("No active trades to close.")
-
-# TAB 3: SECTOR ROTATION & TOP PERFORMERS
-with tab3:
-    st.subheader("🌐 NSE Institutional Capital Flow & Sector Rotation")
-    st.caption("Period-over-Period Institutional Flow Trend (Green = Inflow Increased vs Prev Fortnight, Red = Flow Dropped/Outflow)")
+    st.subheader("Smart Money Delivery Spurt & Trigger Radar")
     
-    df_sec_display = pd.DataFrame(FORTNIGHT_SECTORS)
+    display_df = df_terminal[[
+        "Symbol", "Company", "Sector", "CMP (Rs)", "Smart Money Buy Range (Rs)",
+        "CHoCH Trigger (Rs)", "Support / TSL (Rs)", "Target 1", "Target 2", "Target 3",
+        "Volume Spurt", "Recent Deliv %", "Live Status", "Trade Action", "SMC Structure"
+    ]]
+    
+    st.dataframe(display_df, use_container_width=True, height=550)
 
-    chronological_periods = [
-        "01-Jul to 15-Jul-2026", "16-Jul to 31-Jul-2026", "01-Aug to 15-Aug-2026",
-        "16-Aug to 31-Aug-2026", "01-Sep to 15-Sep-2026", "16-Sep to 30-Sep-2026"
-    ]
-
-    def style_row_trend(row):
-        styles = {col: '' for col in row.index}
-        for i, col in enumerate(chronological_periods):
-            curr_val = row[col]
-            if i == 0:
-                styles[col] = 'background-color: #123319; color: #75f088; font-weight: bold;' if curr_val > 0 else 'background-color: #3b1414; color: #ff8585; font-weight: bold;'
-            else:
-                prev_col = chronological_periods[i - 1]
-                prev_val = row[prev_col]
-                if curr_val > prev_val:
-                    styles[col] = 'background-color: #123319; color: #75f088; font-weight: bold;'
-                else:
-                    styles[col] = 'background-color: #3b1414; color: #ff8585; font-weight: bold;'
-        return pd.Series(styles)
-
-    styled_sec = df_sec_display.style.apply(style_row_trend, axis=1)
-    st.dataframe(styled_sec, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    st.subheader("🔍 Leading Sector ke Top High-Performance Stocks")
-    sel_sec = st.selectbox("Sector Select Karein:", [s["SECTOR"] for s in FORTNIGHT_SECTORS])
-    sec_stocks = [x for x in RADAR_MASTER if x["Sector"] == sel_sec]
-    if sec_stocks:
-        st.dataframe(pd.DataFrame(sec_stocks), use_container_width=True, hide_index=True)
-    else:
-        st.info(f"{sel_sec} me abhi koi stock threshold accumulation criteria pass nahi kar raha.")
-
-# TAB 4: EXITED STOCKS LOG
-with tab4:
-    st.subheader("📜 Removed / Exited Stocks Audit Log")
-    st.caption("1-Week Trailing Analysis with Exact Hinglish Rationale")
-    st.dataframe(pd.DataFrame(EXITED_STOCKS), use_container_width=True, hide_index=True)
+with tab2:
+    st.subheader("Download Audited Radar Data")
+    excel_data = generate_excel_export(df_terminal)
+    st.download_button(
+        label="📥 Download Excel (.xlsx)",
+        data=excel_data,
+        file_name=f"SMC_Institutional_Radar_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
