@@ -1,6 +1,6 @@
 """
-app.py  -  Smart Money Terminal (Streamlit UI)
-Run:  streamlit run app.py
+app.py - Smart Money Terminal: Delivery-based accumulation screener + trade plan
+Run: streamlit run app.py
 """
 import numpy as np
 import pandas as pd
@@ -12,10 +12,6 @@ import engine as E
 
 st.set_page_config(page_title="Smart Money Terminal", page_icon="📈", layout="wide")
 
-QCOL = {"Leading": "#22c55e", "Weakening": "#f59e0b", "Lagging": "#ef4444", "Improving": "#3b82f6"}
-QICON = {"Leading": "🟢 Leading", "Weakening": "🟡 Weakening", "Lagging": "🔴 Lagging",
-         "Improving": "🔵 Improving"}
-
 st.markdown("""
 <style>
 .block-container{padding-top:1rem;max-width:1500px}
@@ -25,275 +21,200 @@ st.markdown("""
 .brand{font-size:1.35rem;font-weight:800;color:#f8fafc;letter-spacing:.5px}
 .brand span{color:#22c55e}
 .meta{color:#94a3b8;font-size:.82rem}
-.badge{padding:3px 10px;border-radius:99px;font-weight:700;font-size:.75rem;margin-right:8px}
-.live{background:#052e16;color:#4ade80;border:1px solid #166534}
-.closed{background:#2a0a0a;color:#f87171;border:1px solid #7f1d1d}
-.pre{background:#2a1c04;color:#fbbf24;border:1px solid #78350f}
-.kpi{background:#0f172a;border:1px solid #334155;border-radius:12px;padding:12px 16px}
+.kpi{background:#0f172a;border:1px solid #334155;border-radius:12px;padding:12px 16px;height:100%}
 .kpi .l{color:#94a3b8;font-size:.72rem;text-transform:uppercase;letter-spacing:.8px}
-.kpi .v{color:#f8fafc;font-size:1.45rem;font-weight:700}
-.kpi .d{font-size:.85rem;font-weight:600}
-.up{color:#22c55e}.dn{color:#ef4444}
-.ins{background:#0f172a;border-left:3px solid #22c55e;padding:8px 14px;margin:6px 0;
- border-radius:6px;color:#e2e8f0;font-size:.92rem}
+.kpi .v{color:#f8fafc;font-size:1.35rem;font-weight:700}
+.kpi .d{font-size:.82rem;font-weight:600;color:#94a3b8}
+.g{color:#22c55e!important}.r{color:#ef4444!important}.y{color:#f59e0b!important}
+.why{background:#0f172a;border-left:3px solid #22c55e;padding:8px 14px;margin:5px 0;
+ border-radius:6px;color:#e2e8f0;font-size:.9rem}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ------------------------------- data ------------------------------------- #
-@st.cache_data(ttl=300, show_spinner="Fetching market data...")
-def load():
-    return E.fetch_prices(E.all_tickers()), E.now_ist()
+def kpi(col, label, value, sub="", cls=""):
+    col.markdown(f'<div class="kpi"><div class="l">{label}</div><div class="v {cls}">{value}</div>'
+                 f'<div class="d">{sub}</div></div>', unsafe_allow_html=True)
 
 
+# ------------------------------ sidebar ----------------------------------- #
 with st.sidebar:
     st.markdown("### ⚙️ Controls")
     if st.button("🔄 Refresh data now"):
         st.cache_data.clear()
         st.rerun()
-    auto = st.toggle("Auto-refresh every 5 min (market hours)", value=True)
-    tail = st.slider("RRG trail (trading days)", 5, 63, 20)
-    st.caption("Data: Yahoo Finance, ~15 min delayed. Not investment advice.")
+    universe = st.radio("Universe", ["My watchlist", "All liquid NSE stocks"], index=0)
+    min_turn = st.slider("Min avg turnover (₹ Cr/day)", 0, 100, 5,
+                         help="Applies to 'All liquid NSE stocks'. Filters illiquid stocks.")
+    extra_txt = st.text_area("Extra symbols (comma separated)", placeholder="e.g. IRFC, RVNL, BAJAJHFL")
+    extra = tuple(s.strip().upper() for s in extra_txt.split(",") if s.strip())
+    st.caption("Source: NSE bhavcopy (end-of-day). NSE publishes delivery data ~6-7 PM IST. "
+               "Analysis tool only, not investment advice.")
 
-if auto and E.market_status() == "LIVE":
-    try:
-        from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=300_000, key="auto")
-    except ImportError:
-        pass
 
-prices, fetched = load()
-sec, tails, missing = E.build_sector_table(prices, 63)
-scr = E.build_screener(prices, sec)
-nifty = E.nifty_snapshot(prices)
+@st.cache_data(ttl=1800, show_spinner="Downloading NSE delivery data (first load can take ~30-60 sec)...")
+def load(extra_syms: tuple):
+    hist, info = E.fetch_history(70)
+    scr = E.compute_screener(hist, extra_syms) if not hist.empty else pd.DataFrame()
+    return hist, scr, info, E.now_ist()
 
-# ------------------------------- header ----------------------------------- #
-status = E.market_status()
-cls = {"LIVE": "live", "CLOSED": "closed", "PRE-OPEN": "pre"}[status]
-asof = nifty["asof"].strftime("%d %b %Y") if nifty else "n/a"
+
+hist, scr, info, fetched = load(extra)
+
+if hist.empty or scr.empty:
+    st.error("NSE data could not be loaded. NSE may be blocking this server or the files are not yet "
+             f"published (network errors: {info['errors']}). Click Refresh after a few minutes.")
+    st.stop()
+
+asof = hist.Date.max()
 st.markdown(f"""
 <div class="topbar">
  <div class="brand">SMART<span>MONEY</span> TERMINAL</div>
- <div class="meta"><span class="badge {cls}">● {status}</span>
- Data as of <b>{asof}</b> &nbsp;|&nbsp; Fetched <b>{fetched.strftime('%d %b %Y, %I:%M:%S %p')} IST</b></div>
+ <div class="meta">Data as of <b>{asof:%d %b %Y}</b> (EOD) &nbsp;|&nbsp;
+ Fetched <b>{fetched:%d %b %Y, %I:%M %p} IST</b> &nbsp;|&nbsp; Sessions loaded: <b>{info['days']}</b></div>
 </div>""", unsafe_allow_html=True)
 
-if not nifty or sec.empty:
-    st.error("Market data could not be loaded (Yahoo Finance issue). Click Refresh in a minute.")
-    st.stop()
-if missing:
-    st.warning(f"No data for: {', '.join(missing)} - excluded from analysis (not shown as blank).")
+watch_all = set(E.SECTOR_OF) | set(extra)
+pool = scr[scr.Symbol.isin(watch_all)] if universe == "My watchlist" else \
+    scr[(scr.Avg_Turnover_Cr >= min_turn) | scr.Symbol.isin(watch_all)]
 
-# snapshot (only complete records are saved)
-E.save_snapshot(sec, nifty["asof"])
+tab1, tab2, tab3 = st.tabs(["🔎 Accumulation Screener", "🎯 Stock Plan", "⚖️ Compare"])
 
+# ---------------------------- Screener ------------------------------------ #
+with tab1:
+    c = st.columns(4)
+    kpi(c[0], "Stocks scanned", f"{len(pool)}", f"of {len(scr)} loaded")
+    kpi(c[1], "Strong accumulation", int((pool.Signal == "Strong Accumulation").sum()), "score ≥ 75", "g")
+    kpi(c[2], "Accumulation", int((pool.Signal == "Accumulation").sum()), "score 55–74", "g")
+    kpi(c[3], "Distribution", int((pool.Signal == "Distribution").sum()), "high delivery + falling", "r")
 
-def kpi(col, label, value, delta=None):
-    d = ""
-    if delta is not None:
-        d = f'<div class="d {"up" if delta >= 0 else "dn"}">{delta:+.2f}%</div>'
-    col.markdown(f'<div class="kpi"><div class="l">{label}</div><div class="v">{value}</div>{d}</div>',
-                 unsafe_allow_html=True)
+    f = st.columns(5)
+    q = f[0].text_input("Search symbol").upper().strip()
+    sig = f[1].multiselect("Signal", ["Strong Accumulation", "Accumulation", "Neutral", "Distribution",
+                                      "Low volume (ignore)"], default=["Strong Accumulation", "Accumulation"])
+    sec_sel = f[2].multiselect("Sector", sorted(pool.Sector.unique()))
+    min_x = f[3].slider("Min delivery qty × avg", 0.0, 5.0, 1.2, 0.1,
+                        help="Today's delivered quantity vs 20-day average delivered quantity")
+    min_pp = f[4].slider("Min delivery % rise (pp)", -10, 30, 0)
 
+    d = pool.copy()
+    if q: d = d[d.Symbol.str.contains(q, regex=False)]
+    if sig: d = d[d.Signal.isin(sig)]
+    if sec_sel: d = d[d.Sector.isin(sec_sel)]
+    d = d[(d.Deliv_Qty_X >= min_x) & (d.Deliv_Per_Chg >= min_pp)]
+    st.caption(f"{len(d)} stocks | sorted by accumulation score | prices as of {asof:%d %b %Y}")
 
-tabs = st.tabs(["📊 Overview", "🔄 Sector Rotation", "🔎 Screener", "⚖️ Compare",
-                "🕯️ Stock Detail", "🗂️ History"])
-
-# ------------------------------ Overview ---------------------------------- #
-with tabs[0]:
-    c = st.columns(5)
-    kpi(c[0], "Nifty 50", f"{nifty['last']:,.2f}", nifty["chg"])
-    kpi(c[1], "Nifty 1M", f"{nifty['m1']:+.2f}%")
-    kpi(c[2], "Nifty 3M", f"{nifty['m3']:+.2f}%")
-    best, worst = sec.sort_values("Ret_1M").iloc[-1], sec.sort_values("Ret_1M").iloc[0]
-    kpi(c[3], "Best sector (1M)", best.Sector, best.Ret_1M)
-    kpi(c[4], "Weakest sector (1M)", worst.Sector, worst.Ret_1M)
-
-    st.markdown("#### Key takeaways")
-    for m in E.build_insights(sec, scr):
-        st.markdown(f'<div class="ins">{m}</div>', unsafe_allow_html=True)
-
-    st.markdown("#### Sector returns heatmap (%)")
-    cols = ["Ret_1D", "Ret_1W", "Ret_1M", "Ret_3M"]
-    z = sec[cols].values
-    fig = go.Figure(go.Heatmap(
-        z=z, x=["1D", "1W", "1M", "3M"], y=sec.Sector, text=np.round(z, 2), texttemplate="%{text}",
-        colorscale="RdYlGn", zmid=0, showscale=False))
-    fig.update_layout(height=420, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10),
-                      yaxis=dict(autorange="reversed"))
-    st.plotly_chart(fig, width="stretch")
-
-# --------------------------- Sector Rotation ------------------------------ #
-with tabs[1]:
-    st.caption("RRG vs Nifty 50: X = RS Ratio (relative trend), Y = RS Momentum. Trail shows recent path.")
-    allx = np.concatenate([t.RS_Ratio.tail(tail).values for t in tails.values()])
-    ally = np.concatenate([t.RS_Mom.tail(tail).values for t in tails.values()])
-    rx = max(1.0, np.abs(allx - 100).max() * 1.15)
-    ry = max(1.0, np.abs(ally - 100).max() * 1.15)
-    fig = go.Figure()
-    for (x0, x1, y0, y1, q) in [(100, 100 + rx, 100, 100 + ry, "Leading"),
-                                (100, 100 + rx, 100 - ry, 100, "Weakening"),
-                                (100 - rx, 100, 100 - ry, 100, "Lagging"),
-                                (100 - rx, 100, 100, 100 + ry, "Improving")]:
-        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=QCOL[q], opacity=0.08, line_width=0)
-        fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=q.upper(), showarrow=False,
-                           font=dict(color=QCOL[q], size=14), opacity=0.35)
-    for name, t in tails.items():
-        t = t.tail(tail)
-        col = QCOL[t.Quadrant.iloc[-1]]
-        fig.add_trace(go.Scatter(x=t.RS_Ratio, y=t.RS_Mom, mode="lines+markers", name=name,
-                                 line=dict(color=col, width=1.5), marker=dict(size=4),
-                                 hovertemplate=f"{name}<br>Ratio %{{x:.2f}}<br>Mom %{{y:.2f}}<extra></extra>",
-                                 showlegend=False))
-        fig.add_trace(go.Scatter(x=[t.RS_Ratio.iloc[-1]], y=[t.RS_Mom.iloc[-1]], mode="markers+text",
-                                 text=[name], textposition="top center",
-                                 marker=dict(size=13, color=col, line=dict(color="white", width=1)),
-                                 showlegend=False, hoverinfo="skip"))
-    fig.add_vline(x=100, line_color="#64748b"); fig.add_hline(y=100, line_color="#64748b")
-    fig.update_layout(height=620, template="plotly_dark", xaxis_title="RS Ratio", yaxis_title="RS Momentum",
-                      xaxis=dict(range=[100 - rx, 100 + rx]), yaxis=dict(range=[100 - ry, 100 + ry]),
-                      margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, width="stretch")
-
-    show = sec.copy()
-    show["Quadrant"] = show.Quadrant.map(QICON)
-    show["Prev_Quadrant"] = show.Prev_Quadrant.map(QICON)
-    show = show.rename(columns={"Prev_Quadrant": "5D Ago", "Days_In_Quad": "Days in Quad"})
-    st.dataframe(show, hide_index=True, width="stretch", column_config={
+    view = d[["Symbol", "Sector", "Price", "Chg_Pct", "Deliv_Per", "Avg_Deliv_Per", "Deliv_Per_Chg",
+              "Deliv_Qty", "Avg_Deliv_Qty", "Deliv_Qty_X", "Vol_X", "Acc_Days_10D", "Score", "Signal",
+              "Entry", "SL", "T1", "T2", "T3"]]
+    st.dataframe(view, hide_index=True, width="stretch", height=560, column_config={
+        "Price": st.column_config.NumberColumn("Price", format="₹%.2f"),
+        "Chg_Pct": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
+        "Deliv_Per": st.column_config.NumberColumn("Deliv % Today", format="%.1f%%"),
+        "Avg_Deliv_Per": st.column_config.NumberColumn("Deliv % 20D Avg", format="%.1f%%"),
+        "Deliv_Per_Chg": st.column_config.NumberColumn("Deliv % Δ (pp)", format="%+.1f"),
+        "Deliv_Qty": st.column_config.NumberColumn("Deliv Qty", format="%d"),
+        "Avg_Deliv_Qty": st.column_config.NumberColumn("Deliv Qty 20D Avg", format="%d"),
+        "Deliv_Qty_X": st.column_config.NumberColumn("Deliv Qty ×", format="%.2fx"),
+        "Vol_X": st.column_config.NumberColumn("Volume ×", format="%.2fx"),
+        "Acc_Days_10D": st.column_config.NumberColumn("Acc Days /10", format="%d"),
         "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
-        **{c: st.column_config.NumberColumn(c.replace("_", " "), format="%.2f%%")
-           for c in ["Ret_1D", "Ret_1W", "Ret_1M", "Ret_3M", "Rel_1M", "Rel_3M"]}})
-    st.info("Tip: Improving -> Leading me jo sector aa rahe hain, unhi ke accumulation stocks Screener me dekho.")
+        "Entry": st.column_config.NumberColumn("Entry", format="₹%.2f"),
+        "SL": st.column_config.NumberColumn("SL", format="₹%.2f"),
+        "T1": st.column_config.NumberColumn("T1", format="₹%.2f"),
+        "T2": st.column_config.NumberColumn("T2", format="₹%.2f"),
+        "T3": st.column_config.NumberColumn("T3", format="₹%.2f"),
+    })
+    st.download_button("⬇️ Download CSV", d.to_csv(index=False).encode(), f"accumulation_{asof:%Y%m%d}.csv",
+                       "text/csv")
+    with st.expander("Score kaise banta hai?"):
+        st.markdown("""
+Baseline = pichle 20 trading days (aaj ko chhodkar).
+- **Delivery qty × avg** (aaj ki delivered qty ÷ 20D avg): ≥2x → 25, ≥1.5x → 18, ≥1.2x → 10
+- **Delivery % rise** (aaj ka % − 20D avg %): ≥10pp → 20, ≥5pp → 12, >0 → 5
+- **5-day delivery qty × avg**: ≥1.3x → 15, ≥1.1x → 8
+- **Accumulation days (last 10)**: din jab delivery qty aur % dono avg se upar aur price flat/up: ≥5 → 20, ≥3 → 12, ≥2 → 6
+- **Close > 20 DMA** → 10, **aaj price up/flat** → 10
 
-# ------------------------------- Screener --------------------------------- #
-with tabs[2]:
-    if scr.empty:
-        st.warning("No stock data available.")
-    else:
-        f = st.columns(5)
-        sectors_sel = f[0].multiselect("Sector", sorted(scr.Sector.unique()))
-        quad_sel = f[1].multiselect("Sector quadrant", ["Leading", "Improving", "Weakening", "Lagging"])
-        sig_sel = f[2].multiselect("Signal", scr.Signal.unique().tolist())
-        min_score = f[3].slider("Min accumulation score", 0, 100, 0, 5)
-        q = f[4].text_input("Search symbol").upper().strip()
-        c2 = st.columns(3)
-        only50 = c2[0].checkbox("Above 50 DMA only")
-        outperf = c2[1].checkbox("Outperforming Nifty (3M)")
-        near_hi = c2[2].checkbox("Within 10% of 52W high")
+Isse "1000 share me 600 delivery" jaise low-volume fake signal nahi aate, kyunki **qty** bhi average se compare hoti hai.
+Distribution = high delivery lekin price girta hua.""")
 
-        d = scr.copy()
-        if sectors_sel: d = d[d.Sector.isin(sectors_sel)]
-        if quad_sel: d = d[d.Sector_Quad.isin(quad_sel)]
-        if sig_sel: d = d[d.Signal.isin(sig_sel)]
-        d = d[d.Acc_Score >= min_score]
-        if q: d = d[d.Symbol.str.contains(q)]
-        if only50: d = d[d.Above_50DMA]
-        if outperf: d = d[d.Rel_3M > 0]
-        if near_hi: d = d[d.From_52W_High >= -10]
+# ---------------------------- Stock plan ---------------------------------- #
+with tab2:
+    syms = pool.Symbol.tolist() if len(pool) else scr.Symbol.tolist()
+    default = syms.index("BAJAJHFL") if "BAJAJHFL" in syms else 0
+    sym = st.selectbox("Stock (type to search)", sorted(scr.Symbol.tolist()),
+                       index=sorted(scr.Symbol.tolist()).index(syms[default]))
+    r = scr[scr.Symbol == sym].iloc[0]
+    g = hist[hist.SYMBOL == sym].sort_values("Date").tail(60)
 
-        st.caption(f"{len(d)} of {len(scr)} stocks | prices as of {asof}")
-        view = d.drop(columns=["Ticker"]).copy()
-        view["Sector_Quad"] = view.Sector_Quad.map(lambda x: QICON.get(x, x))
-        st.dataframe(view, hide_index=True, width="stretch", height=560, column_config={
-            "Acc_Score": st.column_config.ProgressColumn("Acc Score", min_value=0, max_value=100, format="%d"),
-            "Price": st.column_config.NumberColumn("Price", format="₹%.2f"),
-            **{c: st.column_config.NumberColumn(c.replace("_", " "), format="%.2f%%")
-               for c in ["Ret_1D", "Ret_1W", "Ret_1M", "Ret_3M", "Rel_3M", "From_52W_High"]}})
-        st.download_button("⬇️ Download CSV", d.to_csv(index=False).encode(),
-                           f"screener_{nifty['asof']:%Y%m%d}.csv", "text/csv")
-        with st.expander("How is Accumulation Score calculated?"):
-            st.markdown("""
-- **Up/Down volume (20d)** >=1.3 → 25, >=1.0 → 12
-- **OBV rising** (20d) → 20
-- **Close > 50 DMA** → 15, **20 DMA > 50 DMA** → 10
-- **Outperforming Nifty (3M)** → 15
-- **Within 10% of 52W high** → 10
-- **RSI between 45–70** → 5
+    sc = "g" if r.Score >= 55 else "y" if r.Score >= 35 else "r"
+    c = st.columns(5)
+    kpi(c[0], "Last price", f"₹{r.Price:,.2f}", f"{r.Chg_Pct:+.2f}% today", "g" if r.Chg_Pct >= 0 else "r")
+    kpi(c[1], "Accumulation score", f"{r.Score}/100", r.Signal, sc)
+    kpi(c[2], "Delivery % today", f"{r.Deliv_Per:.1f}%", f"20D avg {r.Avg_Deliv_Per:.1f}% ({r.Deliv_Per_Chg:+.1f}pp)")
+    kpi(c[3], "Delivery qty", f"{r.Deliv_Qty_X:.2f}x", f"{r.Deliv_Qty:,} vs avg {r.Avg_Deliv_Qty:,}")
+    kpi(c[4], "Acc / Dist days (10D)", f"{r.Acc_Days_10D} / {r.Dist_Days_10D}", f"Volume {r.Vol_X:.2f}x avg")
 
-Score >=75 Strong Accumulation, >=55 Accumulation, >=35 Neutral, else Weak/Distribution.""")
+    st.markdown("#### Trade plan (ATR based)")
+    risk_pct = r.Risk_Pct
+    c = st.columns(5)
+    kpi(c[0], "Ideal entry zone", f"₹{r.Entry_Low:,.2f} – {r.Entry_High:,.2f}", r.Plan_Status)
+    kpi(c[1], "Stop loss", f"₹{r.SL:,.2f}", f"-{risk_pct:.1f}% from entry", "r")
+    for i, (k, mult) in enumerate([("T1", 1.5), ("T2", 2.5), ("T3", 4.0)]):
+        kpi(c[2 + i], f"Target {i + 1}", f"₹{r[k]:,.2f}", f"+{(r[k] / r.Entry - 1) * 100:.1f}% | {mult}R", "g")
 
-# ------------------------------- Compare ---------------------------------- #
-with tabs[3]:
-    mode = st.radio("Compare", ["Sectors", "Stocks"], horizontal=True)
-    span = st.select_slider("Period", ["1M", "2M", "3M", "6M"], value="3M")
-    n = {"1M": 21, "2M": 42, "3M": 63, "6M": 126}[span]
-    if mode == "Sectors":
-        opts = {s: E.SECTORS[s] for s in sec.Sector}
-        default = sec.Sector.head(3).tolist()
-    else:
-        opts = {r.Symbol: r.Ticker for r in scr.itertuples()}
-        default = scr.Symbol.head(3).tolist()
-    pick = st.multiselect("Select up to 5", list(opts), default=default, max_selections=5)
-    pick_items = {"Nifty 50": E.BENCH, **{p: opts[p] for p in pick}}
-    fig, rows = go.Figure(), []
-    for name, tk in pick_items.items():
-        if tk not in prices:
-            continue
-        c = prices[tk]["Close"].tail(n + 1)
-        base = c / c.iloc[0] * 100
-        fig.add_trace(go.Scatter(x=base.index, y=base, name=name, mode="lines",
-                                 line=dict(width=3 if name == "Nifty 50" else 2,
-                                           dash="dot" if name == "Nifty 50" else "solid")))
-        full = prices[tk]["Close"]
-        rows.append({"Name": name, f"Return {span}": round((c.iloc[-1] / c.iloc[0] - 1) * 100, 2),
-                     "Max Drawdown %": round(((c / c.cummax()) - 1).min() * 100, 2),
-                     "Volatility % (ann.)": round(full.pct_change().tail(n).std() * np.sqrt(252) * 100, 2),
-                     "1W %": round(E.pct(full, 5), 2), "1M %": round(E.pct(full, 21), 2)})
-    fig.update_layout(height=480, template="plotly_dark", yaxis_title="Rebased to 100",
-                      margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified")
+    why = []
+    if r.Deliv_Qty_X >= 1.5:
+        why.append(f"Delivered quantity {r.Deliv_Qty_X:.1f}x its 20-day average - real buying, not just a % quirk.")
+    elif r.Deliv_Qty_X < 1:
+        why.append(f"Delivered quantity is below average ({r.Deliv_Qty_X:.2f}x) - delivery % alone can mislead here.")
+    if r.Deliv_Per_Chg > 0:
+        why.append(f"Delivery % up {r.Deliv_Per_Chg:.1f}pp vs 20-day average.")
+    why.append(f"{r.Acc_Days_10D} accumulation day(s) vs {r.Dist_Days_10D} distribution day(s) in last 10 sessions.")
+    why.append(f"Entry from ATR(14) = ₹{r.ATR}; SL below 10-day swing low ₹{r.Swing_Low10} or 1.5 ATR, whichever is lower.")
+    why.append("Targets are 1.5R / 2.5R / 4R multiples of the risk. Check nearby resistance and news before acting.")
+    for w in why:
+        st.markdown(f'<div class="why">{w}</div>', unsafe_allow_html=True)
+
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.55, 0.22, 0.23],
+                        vertical_spacing=0.03,
+                        subplot_titles=("Price with plan", "Delivery %", "Delivered quantity"))
+    fig.add_trace(go.Candlestick(x=g.Date, open=g.OPEN_PRICE, high=g.HIGH_PRICE, low=g.LOW_PRICE,
+                                 close=g.CLOSE_PRICE, name=sym), row=1, col=1)
+    fig.add_trace(go.Scatter(x=g.Date, y=g.CLOSE_PRICE.rolling(20).mean(), name="20 DMA",
+                             line=dict(color="#f59e0b", width=1.3)), row=1, col=1)
+    for lvl, col, name in [(r.Entry, "#38bdf8", "Entry"), (r.SL, "#ef4444", "SL"), (r.T1, "#22c55e", "T1"),
+                           (r.T2, "#22c55e", "T2"), (r.T3, "#22c55e", "T3")]:
+        fig.add_hline(y=lvl, line_dash="dot", line_color=col, annotation_text=f"{name} {lvl:,.1f}",
+                      annotation_position="right", row=1, col=1)
+    up = (g.CLOSE_PRICE >= g.PREV_CLOSE).values
+    colors = np.where(up, "#22c55e", "#ef4444")
+    fig.add_trace(go.Bar(x=g.Date, y=g.DELIV_PER, marker_color=colors, name="Delivery %"), row=2, col=1)
+    fig.add_hline(y=r.Avg_Deliv_Per, line_dash="dash", line_color="#94a3b8", row=2, col=1)
+    fig.add_trace(go.Bar(x=g.Date, y=g.DELIV_QTY, marker_color=colors, name="Delivered qty"), row=3, col=1)
+    fig.add_hline(y=r.Avg_Deliv_Qty, line_dash="dash", line_color="#94a3b8", row=3, col=1)
+    fig.update_layout(height=800, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False,
+                      margin=dict(l=10, r=70, t=30, b=10))
     st.plotly_chart(fig, width="stretch")
-    if rows:
-        st.dataframe(pd.DataFrame(rows).sort_values(f"Return {span}", ascending=False),
-                     hide_index=True, width="stretch")
+    st.caption("Bar color: green = close up vs previous day, red = down. Dashed line = 20-day average.")
 
-# ----------------------------- Stock detail ------------------------------- #
-with tabs[4]:
-    if scr.empty:
-        st.warning("No stock data available.")
-    else:
-        sym = st.selectbox("Stock", scr.Symbol.tolist())
-        row = scr[scr.Symbol == sym].iloc[0]
-        df = prices[row.Ticker].tail(126)
-        c = st.columns(5)
-        kpi(c[0], "Price", f"₹{row.Price:,.2f}", row.Ret_1D)
-        kpi(c[1], "Acc Score", f"{row.Acc_Score}/100")
-        kpi(c[2], "RSI (14)", f"{row.RSI}")
-        kpi(c[3], "From 52W High", f"{row.From_52W_High:.1f}%")
-        kpi(c[4], "Signal", row.Signal)
-        full = prices[row.Ticker]["Close"]
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
-        fig.add_trace(go.Candlestick(x=df.index, open=df.Open, high=df.High, low=df.Low, close=df.Close,
-                                     name=sym), row=1, col=1)
-        for w, col in [(20, "#f59e0b"), (50, "#3b82f6")]:
-            fig.add_trace(go.Scatter(x=df.index, y=full.rolling(w).mean().reindex(df.index),
-                                     name=f"{w} DMA", line=dict(color=col, width=1.4)), row=1, col=1)
-        colors = np.where(df.Close >= df.Open, "#22c55e", "#ef4444")
-        fig.add_trace(go.Bar(x=df.index, y=df.Volume, marker_color=colors, name="Volume"), row=2, col=1)
-        fig.update_layout(height=620, template="plotly_dark", xaxis_rangeslider_visible=False,
-                          margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h"))
+# ----------------------------- Compare ------------------------------------ #
+with tab3:
+    pick = st.multiselect("Select up to 4 stocks", sorted(scr.Symbol.tolist()),
+                          default=[s for s in ["BAJAJHFL", "BAJFINANCE"] if s in set(scr.Symbol)], max_selections=4)
+    if pick:
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                            subplot_titles=("Delivery % (5-day smoothed)", "Price rebased to 100"))
+        for s in pick:
+            gs = hist[hist.SYMBOL == s].sort_values("Date").tail(60)
+            fig.add_trace(go.Scatter(x=gs.Date, y=gs.DELIV_PER.rolling(5).mean(), name=s), row=1, col=1)
+            fig.add_trace(go.Scatter(x=gs.Date, y=gs.CLOSE_PRICE / gs.CLOSE_PRICE.iloc[0] * 100, name=s,
+                                     showlegend=False), row=2, col=1)
+        fig.update_layout(height=640, template="plotly_dark", hovermode="x unified",
+                          margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig, width="stretch")
-
-# ------------------------------- History ---------------------------------- #
-with tabs[5]:
-    st.markdown("#### Quadrant history (last ~3 months)")
-    hist = pd.DataFrame({k: v.Quadrant for k, v in tails.items()})
-    codes = hist.replace(E.QUAD_CODE).astype(float)
-    fig = go.Figure(go.Heatmap(
-        z=codes.T.values, x=[d.strftime("%d %b") for d in hist.index], y=hist.columns, text=hist.T.values,
-        hovertemplate="%{y} | %{x}<br>%{text}<extra></extra>", showscale=False, zmin=0, zmax=3,
-        colorscale=[[0, QCOL["Lagging"]], [.33, QCOL["Improving"]], [.66, QCOL["Weakening"]], [1, QCOL["Leading"]]]))
-    fig.update_layout(height=460, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10),
-                      yaxis=dict(autorange="reversed"))
-    st.plotly_chart(fig, width="stretch")
-    st.caption("🟢 Leading  🟡 Weakening  🔴 Lagging  🔵 Improving")
-
-    st.markdown("#### Saved daily snapshots")
-    snaps = E.load_snapshots()
-    if snaps.empty:
-        st.info("Snapshots will start accumulating from today (one verified record per trading day).")
-    else:
-        sel = st.selectbox("Sector", ["All"] + sorted(snaps.Sector.unique()))
-        s = snaps if sel == "All" else snaps[snaps.Sector == sel]
-        st.dataframe(s.sort_values(["Date", "Rank"], ascending=[False, True]), hide_index=True, width="stretch")
-        st.download_button("⬇️ Download all snapshots", snaps.to_csv(index=False).encode(),
-                           "sector_snapshots.csv", "text/csv")
+        cmp = scr[scr.Symbol.isin(pick)][["Symbol", "Score", "Signal", "Deliv_Per", "Avg_Deliv_Per",
+                                          "Deliv_Per_Chg", "Deliv_Qty_X", "Acc_Days_10D", "Dist_Days_10D",
+                                          "Entry", "SL", "T1", "T2", "T3"]]
+        st.dataframe(cmp, hide_index=True, width="stretch")
