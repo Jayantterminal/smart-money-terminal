@@ -1,5 +1,5 @@
 """
-Institutional Smart Money Terminal (v4.1 - Production Release)
+Institutional Smart Money Terminal (v4.2 - Production Fix)
 ------------------------------------------------------------------
 Framework (Three-Pillar Institutional SMC):
   Pillar 1: Full 22 NSE Sector Capital Rotation Matrix (Inflow vs Outflow)
@@ -36,10 +36,9 @@ STALE_DEVIATION_PCT = 15.0
 RADAR_MAX_AGE_DAYS = 3
 HEAVY_SHIFT = 0.50
 MAX_LOGIN_ATTEMPTS = 5
-LEGACY_PASSWORD = "2000"  # dev fallback only - set TERMINAL_PASSWORD in secrets / env
+LEGACY_PASSWORD = "2000"
 TRADE_BOOK_PATH = "data/active_trades.json"
 
-# Pillar 1 - (recent 12D share %, base share %). Shift / status / signal are DERIVED.
 SECTOR_SHARES = {
     "Financial Services": (29.01, 26.50),
     "Healthcare": (8.13, 7.45),
@@ -535,17 +534,28 @@ def generate_excel_export(df: pd.DataFrame, sec_df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 # ==========================================================
-# TRADE BOOK ENGINE (CRASH-PROOF)
+# TRADE BOOK ENGINE (CRASH-PROOF AUTO REPAIR)
 # ==========================================================
 def load_trades() -> list:
-    if os.path.exists(TRADE_BOOK_PATH):
-        try:
-            with open(TRADE_BOOK_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else []
-        except Exception:
-            pass
-    return []
+    if not os.path.exists(TRADE_BOOK_PATH):
+        return []
+    try:
+        with open(TRADE_BOOK_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                return []
+            repaired = []
+            for item in data:
+                if isinstance(item, dict):
+                    # Guarantee id key
+                    if "id" not in item:
+                        item["id"] = uuid.uuid4().hex[:8]
+                    if "symbol" not in item and "Symbol" in item:
+                        item["symbol"] = item["Symbol"]
+                    repaired.append(item)
+            return repaired
+    except Exception:
+        return []
 
 def save_trades(trades: list) -> None:
     os.makedirs(os.path.dirname(TRADE_BOOK_PATH), exist_ok=True)
@@ -557,7 +567,6 @@ def trade_row(t: dict, quotes: dict) -> dict:
     mult = 1 if side == "LONG" else -1
     closed = t.get("status") == "CLOSED"
     
-    # SAFE EXTRACTION: KeyError prevent karta hai
     sym = str(t.get("symbol") or t.get("Symbol") or "").strip().upper()
     q_data = quotes.get(sym, {}) if sym else {}
     
@@ -569,7 +578,7 @@ def trade_row(t: dict, quotes: dict) -> dict:
     pnl = (px - entry) * mult * qty if px is not None else np.nan
     pnl_pct = (px / entry - 1) * 100 * mult if (px is not None and entry > 0) else np.nan
     return {
-        "ID": t.get("id", ""), "Symbol": sym, "Side": side, "Qty": qty,
+        "ID": t.get("id", uuid.uuid4().hex[:8]), "Symbol": sym, "Side": side, "Qty": qty,
         "Entry (Rs)": entry, "SL (Rs)": sl,
         "CMP / Exit (Rs)": px, "P&L (Rs)": pnl, "P&L %": pnl_pct,
         "Risk (Rs)": abs(entry - sl) * qty,
@@ -578,7 +587,7 @@ def trade_row(t: dict, quotes: dict) -> dict:
     }
 
 # ==========================================================
-# UI STYLING (WITH HIGHLIGHTED TABS 1 & 2)
+# UI STYLING (HIGHLIGHTED TABS)
 # ==========================================================
 CSS = """
 <style>
@@ -590,14 +599,13 @@ CSS = """
   div[data-testid="stDataFrame"]{border:1px solid #30363D;border-radius:8px;padding:2px;}
   div[data-testid="stForm"]{border:1px solid #30363D;border-radius:8px;background:#0F141B;}
   
-  /* Tabs base */
   .stTabs [data-baseweb="tab-list"]{gap:8px;border-bottom:2px solid #30363D;padding-bottom:4px;}
   .stTabs [data-baseweb="tab"]{
       background-color:#161B22;border:1px solid #30363D;border-radius:6px;
       color:#8B949E;font-weight:600;padding:8px 18px;transition: all 0.2s ease-in-out;
   }
   
-  /* Specific Neon Highlights for Tab 1 and Tab 2 */
+  /* Highlight Tab 1 & Tab 2 */
   .stTabs [data-baseweb="tab"]:nth-child(1) {
       border: 1px solid #238636 !important;
       background: linear-gradient(180deg, #161B22, #0d2116) !important;
@@ -609,7 +617,6 @@ CSS = """
       color: #58A6FF !important;
   }
   
-  /* Selected tab active glow */
   .stTabs [aria-selected="true"]{
       box-shadow: 0 0 10px rgba(88, 166, 255, 0.3) !important;
       font-weight:700 !important;
@@ -862,26 +869,28 @@ def main():
 
             section("4.4", "Manage Positions")
             mc1, mc2 = st.columns(2)
-            open_ids = [t["id"] for t in trades if t.get("status") == "OPEN"]
+            open_ids = [t.get("id") for t in trades if t.get("status") == "OPEN" and t.get("id")]
+            all_ids = [t.get("id") for t in trades if t.get("id")]
+            
             with mc1:
                 with st.form("tb_close"):
                     cid = st.selectbox("Close position", open_ids) if open_ids else None
                     ex_px = st.number_input("Exit Price (Rs)", value=0.0, step=0.05)
                     if st.form_submit_button("✅ Close Position", **STRETCH) and cid:
                         for t in trades:
-                            if t["id"] == cid:
+                            if t.get("id") == cid:
                                 t["status"] = "CLOSED"
                                 t["exit"] = float(ex_px) if ex_px > 0 else float(
-                                    (quotes.get(t["symbol"]) or {}).get("cmp", t["entry"]))
+                                    (quotes.get(t.get("symbol", "")) or {}).get("cmp", t.get("entry", 0.0)))
                                 t["closed_at"] = now.strftime("%Y-%m-%d %H:%M")
                         save_trades(trades)
                         st.rerun()
                     st.caption("Exit price 0 = use current CMP.")
             with mc2:
                 with st.form("tb_del"):
-                    did = st.selectbox("Delete record", [t["id"] for t in trades])
-                    if st.form_submit_button("🗑️ Delete Record", **STRETCH):
-                        st.session_state.trades = [t for t in trades if t["id"] != did]
+                    did = st.selectbox("Delete record", all_ids) if all_ids else None
+                    if st.form_submit_button("🗑️ Delete Record", **STRETCH) and did:
+                        st.session_state.trades = [t for t in trades if t.get("id") != did]
                         save_trades(st.session_state.trades)
                         st.rerun()
 
