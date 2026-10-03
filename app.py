@@ -31,7 +31,6 @@ st.markdown("""
 .g{color:#22c55e!important}.r{color:#ef4444!important}.y{color:#f59e0b!important}
 .why{background:#0f172a;border-left:3px solid #22c55e;padding:8px 14px;margin:5px 0;
  border-radius:6px;color:#e2e8f0;font-size:.9rem}
-/* clickable KPI cards */
 .st-key-kpis button{width:100%;height:92px;border-radius:12px;border:1px solid #334155;
  background:#0f172a;white-space:pre-line;line-height:1.35}
 .st-key-kpis button p{font-size:.95rem;font-weight:600}
@@ -400,7 +399,6 @@ with tab2:
         st.warning("Sector data nahi mila (NSE sector file load nahi hui ya universe chhota hai). "
                    "Universe 'All liquid NSE stocks' rakho aur Refresh karo.")
     else:
-        # ---------- Top KPI strip ----------
         q_counts = sec.groupby("Quadrant").size().to_dict()
         q_flow = sec.groupby("Quadrant").Flow_1M.mean().to_dict()
         kc = st.columns(4)
@@ -416,7 +414,6 @@ with tab2:
                    "**Top-right (Leading)** = already strong. **Top-left (Improving)** = early entry zone. "
                    "Bubble size = stocks in sector.")
 
-        # ---------- Quadrant chart ----------
         xs = sec.Flow_1M.replace([np.inf, -np.inf], np.nan).dropna()
         ys = sec.Flow_Chg.replace([np.inf, -np.inf], np.nan).dropna()
         if xs.empty or ys.empty:
@@ -460,7 +457,7 @@ with tab2:
                                    "Accumulating: %{customdata[0]}%% of %{customdata[1]}<br>"
                                    "Fresh: %{customdata[2]}<br>"
                                    "Deliv qty 1M÷3M: %{customdata[3]:.2f}x<br>"
-                                   "Ret 1M: %{customdata[4]:+.1f}%<extra></extra>")))
+                                   "Ret 1M: %{customdata[4]:+.1f}%<extra></extra>"))
             fig.add_vline(x=0, line_color="#475569", line_width=1)
             fig.add_hline(y=0, line_color="#475569", line_width=1)
             fig.update_layout(
@@ -474,7 +471,6 @@ with tab2:
                 hoverlabel=dict(bgcolor="#0f172a", bordercolor="#334155"))
             st.plotly_chart(fig, width="stretch", key="sec_chart")
 
-        # ---------- Top / Bottom movers ----------
         c1, c2 = st.columns(2)
         top = sec.sort_values("Flow_Chg", ascending=False).head(5)[
             ["Sector", "Quadrant", "Flow_1M", "Flow_Chg", "Acc_Pct", "Stocks"]]
@@ -499,7 +495,6 @@ with tab2:
                                  min_value=0, max_value=100, format="%d%%"),
                          })
 
-        # ---------- Full sector table (clickable) ----------
         st.markdown("###### 📋 All sectors — click row to drill into stocks")
         sv = sec.copy()
         sv["Quadrant"] = sv.Quadrant.map(QICON)
@@ -535,6 +530,39 @@ with tab2:
         st.caption("Returns = sector ke stocks ka median. Flow = sector stocks ka average net buy flow. "
                    "Quadrant: Leading = flow + aur badh raha | Improving = flow abhi - par sudhar raha (early) | "
                    "Weakening = flow + par ghat raha | Lagging = flow - aur bigad raha.")
+
+        # ---------- Data verification ----------
+        with st.expander("🔍 Verify sector data (accuracy check)"):
+            sm = E.fetch_sector_map()
+            st.write(f"**Sector map rows:** {len(sm)}")
+            if not sm.empty:
+                st.dataframe(sm.head(10), hide_index=True, use_container_width=True)
+
+            missing = pool[~pool.Symbol.isin(sm.Symbol)] if not sm.empty else pool
+            if not missing.empty:
+                st.warning(f"⚠️ {len(missing)} stocks ka sector mapping missing hai "
+                           f"(sector 'Unknown' me daale gaye): {', '.join(missing.Symbol.head(15).tolist())}")
+            else:
+                st.success("✅ Saare stocks ka sector mapped hai.")
+
+            st.write("**Raw sector rotation output:**")
+            st.dataframe(sec, hide_index=True, use_container_width=True)
+
+            st.write("**Sanity checks:**")
+            issues = []
+            if (sec.Flow_1M.abs() > 100).any():
+                issues.append("Flow_1M me ±100% se bahar values — Net_Flow calculation check karo.")
+            if (sec.Flow_Prev.abs() > 100).any():
+                issues.append("Flow_Prev me ±100% se bahar values — Net_Flow calculation check karo.")
+            if (sec.Stocks < 3).any():
+                issues.append(f"{int((sec.Stocks<3).sum())} sectors me 3 se kam stocks — average noisy hoga.")
+            if sec.Quadrant.isna().any():
+                issues.append("Kuch sectors me Quadrant blank hai.")
+            if issues:
+                for i in issues:
+                    st.warning(i)
+            else:
+                st.success("✅ Sab sanity checks pass.")
 
 # ---------------------------- Stock plan ---------------------------------- #
 with tab3:
