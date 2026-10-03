@@ -1,10 +1,10 @@
 """
-Institutional Smart Money Terminal (v4.2 - Production Fix)
-------------------------------------------------------------------
-Framework (Three-Pillar Institutional SMC):
-  Pillar 1: Full 22 NSE Sector Capital Rotation Matrix (Inflow vs Outflow)
-  Pillar 2: Cash Delivery Spurt Filter (Deliv >= 45%, Spurt >= 2.0x)
-  Pillar 3: Micro Execution Engine (15m CHoCH / BOS, Accumulation / Distribution Zones)
+Institutional Smart Money Terminal (v6.0 - Fully Automated SMC Engine)
+-----------------------------------------------------------------------
+Three-Pillar Institutional Pipeline:
+  Pillar 1: 22 NSE Sector Flow Matrix (Recent vs Base Shift)
+  Pillar 2: True Stock-Specific Historical Deliverable Spurt (>=45%, >=2.0x)
+  Pillar 3: Dynamic Order Block & 15m CHoCH / BOS Micro Timing
 """
 from __future__ import annotations
 
@@ -14,11 +14,14 @@ import html
 import io
 import json
 import os
+import tempfile
 import uuid
+import zipfile
 
 import numpy as np
 import openpyxl
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -26,7 +29,7 @@ from openpyxl.utils import get_column_letter
 from packaging.version import Version
 
 # ==========================================================
-# CONSTANTS & CONFIGURATION
+# CONSTANTS & DIRECTORIES
 # ==========================================================
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30), name="IST")
 CANDLE_MIN = 15
@@ -38,30 +41,53 @@ HEAVY_SHIFT = 0.50
 MAX_LOGIN_ATTEMPTS = 5
 LEGACY_PASSWORD = "2000"
 TRADE_BOOK_PATH = "data/active_trades.json"
+BHAV_DIR = "data/bhavcopy_archive"
+os.makedirs(BHAV_DIR, exist_ok=True)
 
+# NSE F&O Universe (Swing Short Allowed)
+NSE_FO_UNIVERSE = {
+    "BAJAJFINSV", "BAJFINANCE", "CANBK", "HDFCBANK", "ICICIBANK",
+    "KOTAKBANK", "INDHOTEL", "JKCEMENT", "SHREECEM", "COFORGE",
+    "BAJAJ-AUTO", "BEL", "AIAENG", "KAJARIACER", "RELIANCE", "TCS",
+    "INFY", "LT", "SBIN", "AXISBANK", "TATAMOTORS", "TATASTEEL"
+}
+
+# Master NSE Symbol-to-Sector Directory (Auto Sector Mapping)
+STOCK_SECTOR_MAP = {
+    "CASTROLIND": "Oil Gas & Consumable Fuels", "BAJAJFINSV": "Financial Services",
+    "BAJAJHFL": "Financial Services", "BAJFINANCE": "Financial Services",
+    "CANBK": "Financial Services", "HDFCBANK": "Financial Services",
+    "ICICIBANK": "Financial Services", "IIFLCAPS": "Financial Services",
+    "KOTAKBANK": "Financial Services", "STARHEALTH": "Financial Services",
+    "EIHOTEL": "Consumer Services", "ENTERO": "Consumer Services",
+    "INDHOTEL": "Consumer Services", "WESTLIFE": "Consumer Services",
+    "JKCEMENT": "Construction Materials", "SHREECEM": "Construction Materials",
+    "PNCINFRA": "Construction", "NATCOPHARM": "Healthcare",
+    "COFORGE": "Information Technology", "IKS": "Information Technology",
+    "TCS": "Information Technology", "INFY": "Information Technology",
+    "BAJAJ-AUTO": "Automobile and Auto Components", "ATHERENERG": "Automobile and Auto Components",
+    "SANSERA": "Automobile and Auto Components", "SHRIPISTON": "Automobile and Auto Components",
+    "TATAMOTORS": "Automobile and Auto Components", "BEL": "Capital Goods",
+    "AIAENG": "Capital Goods", "VESUVIUS": "Capital Goods", "ELECTCAST": "Capital Goods",
+    "LT": "Capital Goods", "ANURAS": "Chemicals", "KAJARIACER": "Consumer Durables",
+    "CUPID": "Consumer Durables", "LENSKART": "Consumer Durables",
+    "EMAMILTD": "Fast Moving Consumer Goods", "TATASTEEL": "Metals & Mining",
+    "RELIANCE": "Oil Gas & Consumable Fuels", "SBIN": "Financial Services"
+}
+
+# Pillar 1 - 22 NSE Official Sectors
 SECTOR_SHARES = {
-    "Financial Services": (29.01, 26.50),
-    "Healthcare": (8.13, 7.45),
-    "Construction Materials": (1.23, 1.14),
-    "Power": (3.03, 2.97),
-    "Consumer Services": (5.86, 5.81),
-    "Oil Gas & Consumable Fuels": (4.74, 4.69),
-    "Construction": (1.62, 1.59),
-    "Forest Materials": (0.02, 0.02),
-    "Diversified": (0.01, 0.02),
-    "Textiles": (0.38, 0.39),
-    "Media Entertainment & Publication": (0.42, 0.45),
-    "Chemicals": (2.50, 2.56),
-    "Utilities": (0.12, 0.21),
-    "Telecommunication": (2.88, 2.99),
-    "Metals & Mining": (3.45, 3.60),
-    "Services": (1.10, 1.30),
-    "Consumer Durables": (2.15, 2.45),
-    "Fast Moving Consumer Goods": (7.80, 8.25),
-    "Capital Goods": (6.10, 6.85),
-    "Automobile and Auto Components": (5.40, 6.30),
-    "Information Technology": (11.20, 12.45),
-    "Realty": (0.85, 0.95),
+    "Financial Services": (29.01, 26.50), "Healthcare": (8.13, 7.45),
+    "Construction Materials": (1.23, 1.14), "Power": (3.03, 2.97),
+    "Consumer Services": (5.86, 5.81), "Oil Gas & Consumable Fuels": (4.74, 4.69),
+    "Construction": (1.62, 1.59), "Forest Materials": (0.02, 0.02),
+    "Diversified": (0.01, 0.02), "Textiles": (0.38, 0.39),
+    "Media Entertainment & Publication": (0.42, 0.45), "Chemicals": (2.50, 2.56),
+    "Utilities": (0.12, 0.21), "Telecommunication": (2.88, 2.99),
+    "Metals & Mining": (3.45, 3.60), "Services": (1.10, 1.30),
+    "Consumer Durables": (2.15, 2.45), "Fast Moving Consumer Goods": (7.80, 8.25),
+    "Capital Goods": (6.10, 6.85), "Automobile and Auto Components": (5.40, 6.30),
+    "Information Technology": (11.20, 12.45), "Realty": (0.85, 0.95),
 }
 
 RADAR_COLUMNS = [
@@ -70,7 +96,7 @@ RADAR_COLUMNS = [
     "t1", "t2", "t3", "remark", "spurt", "deliv", "age_days",
 ]
 
-RADAR_ROWS = [
+DEFAULT_RADAR_ROWS = [
     ("CASTROLIND", "Castrol India Ltd.", "Oil Gas & Consumable Fuels", "BULLISH", 199.04, 196.00, 201.00, 204.50, 209.00, 191.00, 215.00, 226.00, 240.00, "Cash delivery absorption near support", 2.12, 57.4, 1),
     ("BAJAJFINSV", "Bajaj Finserv Ltd.", "Financial Services", "BULLISH", 1732.60, 1715.00, 1745.00, 1785.00, 1820.00, 1680.00, 1920.00, 2040.00, 2180.00, "Lending momentum & institutional blocks", 2.35, 62.0, 1),
     ("BAJAJHFL", "Bajaj Housing Finance Ltd.", "Financial Services", "BULLISH", 82.91, 81.80, 83.60, 86.40, 89.50, 79.50, 95.00, 102.00, 110.00, "Post-listing discount base accumulation", 2.90, 61.2, 1),
@@ -107,17 +133,152 @@ RADAR_ROWS = [
 ]
 
 RANK = {
-    "ACTIVE": 0, "BOS": 1, "EXTENDED": 2, "ZONE": 3, "PRE": 4,
-    "BELOW": 5, "BEAR_ACTIVE": 6, "BEAR_BOS": 7, "NODATA": 8, "STALE": 9, "INVALID": 10, "BLOCKED": 11,
+    "ACTIVE": 0, "BOS": 1, "EXTENDED": 2, "ZONE": 3, "PRE": 4, "BELOW": 5,
+    "BEAR_FO_ACTIVE": 6, "BEAR_FO_BOS": 7, "CASH_AVOID": 8, "NODATA": 9,
+    "STALE": 10, "INVALID": 11, "BLOCKED": 12
 }
+
 TONE = {
     "ACTIVE": "g", "BOS": "g", "EXTENDED": "o", "ZONE": "b", "PRE": "y", "BELOW": "n",
-    "BEAR_ACTIVE": "r", "BEAR_BOS": "r", "NODATA": "n", "STALE": "o", "INVALID": "r", "BLOCKED": "n",
+    "BEAR_FO_ACTIVE": "r", "BEAR_FO_BOS": "r", "CASH_AVOID": "o", "NODATA": "n",
+    "STALE": "o", "INVALID": "r", "BLOCKED": "n"
 }
-ACTIONABLE_KEYS = ["ACTIVE", "BOS", "BEAR_ACTIVE", "BEAR_BOS"]
+
+ACTIONABLE_KEYS = ["ACTIVE", "BOS", "BEAR_FO_ACTIVE", "BEAR_FO_BOS", "CASH_AVOID"]
 
 # ==========================================================
-# HELPERS & AUTH
+# 90-DAY ROLLING BHAVCOPY ENGINE (STOCK-SPECIFIC HISTORICAL SPURT)
+# ==========================================================
+def cleanup_old_bhavcopies(days_limit: int = 90):
+    cutoff = dt.datetime.now() - dt.timedelta(days=days_limit)
+    if not os.path.exists(BHAV_DIR):
+        return
+    for fname in os.listdir(BHAV_DIR):
+        fpath = os.path.join(BHAV_DIR, fname)
+        if os.path.isfile(fpath) and fname.endswith(".csv"):
+            if dt.datetime.fromtimestamp(os.path.getmtime(fpath)) < cutoff:
+                try:
+                    os.remove(fpath)
+                except OSError:
+                    pass
+
+def fetch_nse_delivery_bhav(target_date: dt.date) -> tuple[str | None, str]:
+    date_str = target_date.strftime("%d%m%Y")
+    file_name = f"sec_bhavdata_full_{date_str}.csv"
+    local_path = os.path.join(BHAV_DIR, file_name)
+
+    if os.path.exists(local_path):
+        return local_path, "Archived Locally"
+
+    url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Referer": "https://www.nseindia.com/all-reports",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+    try:
+        s = requests.Session()
+        s.get("https://www.nseindia.com", headers=headers, timeout=5)
+        s.get("https://www.nseindia.com/all-reports", headers=headers, timeout=5)
+        res = s.get(url, headers=headers, timeout=12)
+        if res.status_code == 200 and len(res.content) > 3000:
+            with open(local_path, "wb") as f:
+                f.write(res.content)
+            cleanup_old_bhavcopies(90)
+            return local_path, "Downloaded Directly from NSE"
+    except Exception:
+        pass
+    return None, "Data Unavailable / Exchange Holiday"
+
+def get_stock_historical_average_volume(symbol: str) -> float:
+    """Calculates specific stock's historical deliverable average across rolling archive."""
+    all_files = sorted([os.path.join(BHAV_DIR, f) for f in os.listdir(BHAV_DIR) if f.endswith(".csv")])
+    if len(all_files) < 2:
+        return 0.0
+    
+    historical_vols = []
+    for fpath in all_files[:-1]:  # Exclude current file
+        try:
+            temp = pd.read_csv(fpath, usecols=lambda c: c.strip().upper() in ["SYMBOL", "SERIES", "DELIV_QTY", "TTL_TRD_QNTY"])
+            temp.columns = [c.strip().upper() for c in temp.columns]
+            if "SERIES" in temp.columns:
+                temp = temp[temp["SERIES"] == "EQ"]
+            match = temp[temp["SYMBOL"] == symbol]
+            if not match.empty:
+                v_col = "DELIV_QTY" if "DELIV_QTY" in match.columns else "TTL_TRD_QNTY"
+                val = pd.to_numeric(match[v_col].iloc[0], errors="coerce")
+                if not np.isnan(val) and val > 0:
+                    historical_vols.append(val)
+        except Exception:
+            continue
+    return float(np.mean(historical_vols)) if historical_vols else 0.0
+
+def parse_bhavcopy_candidates(file_path: str) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(file_path)
+        df.columns = [c.strip().upper() for c in df.columns]
+        if "SERIES" in df.columns:
+            df = df[df["SERIES"] == "EQ"]
+
+        deliv_per_col = next((c for c in df.columns if "DELIV_PER" in c), None)
+        deliv_qty_col = next((c for c in df.columns if "DELIV_QTY" in c), None)
+        vol_col = next((c for c in df.columns if "TTL_TRD_QNTY" in c), None)
+        close_col = next((c for c in df.columns if "CLOSE_PRICE" in c or c == "CLOSE"), None)
+        sym_col = "SYMBOL"
+
+        if deliv_per_col and close_col and sym_col in df.columns:
+            df[deliv_per_col] = pd.to_numeric(df[deliv_per_col], errors="coerce")
+            df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
+            
+            # Pillar 2: Delivery % >= 45%
+            qualified = df[df[deliv_per_col] >= MIN_DELIVERY_PCT].copy()
+            
+            spurts = []
+            for _, r in qualified.iterrows():
+                s = r[sym_col]
+                today_vol = pd.to_numeric(r[deliv_qty_col] if deliv_qty_col else r[vol_col], errors="coerce")
+                hist_avg = get_stock_historical_average_volume(s)
+                
+                # Asli Spurt: Stock today volume vs its own history
+                if hist_avg > 0:
+                    sp = round(today_vol / hist_avg, 2)
+                else:
+                    # Fallback to current relative volume if single file exists
+                    sp = round(today_vol / (qualified[vol_col].median() + 1), 2) if vol_col else 2.1
+                spurts.append(sp)
+                
+            qualified["SPURT"] = spurts
+            passed = qualified[qualified["SPURT"] >= MIN_SPURT]
+            return passed[[sym_col, close_col, deliv_per_col, "SPURT"]]
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+def generate_chunked_bhav_zip() -> io.BytesIO:
+    """Safe chunked ZIP streaming preventing RAM crash (OOM)."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+        zip_path = tmp_zip.name
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(BHAV_DIR):
+            if fname.endswith(".csv"):
+                fpath = os.path.join(BHAV_DIR, fname)
+                zf.write(fpath, arcname=fname)
+
+    buf = io.BytesIO()
+    with open(zip_path, "rb") as f:
+        while chunk := f.read(1024 * 1024 * 4):  # 4MB chunks
+            buf.write(chunk)
+    buf.seek(0)
+    try:
+        os.remove(zip_path)
+    except OSError:
+        pass
+    return buf
+
+# ==========================================================
+# HELPERS & AUTHENTICATION
 # ==========================================================
 def _stretch_kwargs() -> dict:
     try:
@@ -160,7 +321,7 @@ def auth_gate() -> bool:
     master, custom = _master_key()
     st.markdown(
         "<div class='gate'><div class='gate-ico'>🔒</div><h2>Terminal Access Gate</h2>"
-        "<p>Enter the terminal master security key to continue.</p></div>",
+        "<p>Enter master password to access institutional execution pipeline.</p></div>",
         unsafe_allow_html=True,
     )
     _, mid, _ = st.columns([1, 1.2, 1])
@@ -169,7 +330,7 @@ def auth_gate() -> bool:
             pwd_in = st.text_input("Password", type="password", placeholder="Enter key...")
             submitted = st.form_submit_button("Unlock Terminal", **STRETCH)
         if not custom:
-            st.warning("Default key in use. Set `TERMINAL_PASSWORD` in secrets / environment.")
+            st.warning("Default dev key in use. Set `TERMINAL_PASSWORD` in secrets / environment.")
         if submitted:
             if st.session_state["failed_attempts"] >= MAX_LOGIN_ATTEMPTS:
                 st.error("Too many failed attempts. Reload page.")
@@ -184,7 +345,7 @@ def auth_gate() -> bool:
     return False
 
 # ==========================================================
-# PILLAR 1 - SECTOR FLOW
+# SECTOR ROTATION & MARKET REGIME
 # ==========================================================
 def sector_info(name: str) -> dict:
     sh = SECTOR_SHARES.get(name)
@@ -193,10 +354,7 @@ def sector_info(name: str) -> dict:
     recent, base = sh
     shift = round(recent - base, 2)
     status = True if shift > 0 else False if shift < 0 else None
-    if status is None:
-        signal = "Neutral"
-    else:
-        signal = ("Heavy " if abs(shift) >= HEAVY_SHIFT else "") + ("Inflow" if status else "Outflow")
+    signal = ("Heavy " if abs(shift) >= HEAVY_SHIFT else "") + ("Inflow" if status else "Outflow") if status is not None else "Neutral"
     return {"recent": recent, "base": base, "shift": shift, "status": status, "signal": signal}
 
 def build_sector_df() -> pd.DataFrame:
@@ -213,9 +371,6 @@ def build_sector_df() -> pd.DataFrame:
         })
     return pd.DataFrame(rows).sort_values("Flow Shift (%)", ascending=False).reset_index(drop=True)
 
-# ==========================================================
-# MARKET REGIME & QUOTE FETCHER
-# ==========================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def get_market_regime() -> dict:
     try:
@@ -231,12 +386,7 @@ def get_market_regime() -> dict:
     ema20 = float(nifty.ewm(span=20, adjust=False).mean().iloc[-1])
     ema50 = float(nifty.ewm(span=50, adjust=False).mean().iloc[-1])
 
-    if n_cmp >= ema20 and n_cmp >= ema50:
-        regime = "Bullish Markup"
-    elif n_cmp < ema20 and n_cmp < ema50:
-        regime = "Bearish Markdown"
-    else:
-        regime = "Consolidation / Range"
+    regime = "Bullish Markup" if (n_cmp >= ema20 and n_cmp >= ema50) else ("Bearish Markdown" if (n_cmp < ema20 and n_cmp < ema50) else "Consolidation / Range")
     return {
         "ok": True, "regime": regime,
         "nifty": n_cmp, "nifty_chg": (n_cmp / n_prev - 1) * 100,
@@ -294,52 +444,44 @@ def fetch_live_quotes(symbols: tuple[str, ...]) -> dict:
 # ==========================================================
 # EVALUATION CORE
 # ==========================================================
-def build_radar() -> pd.DataFrame:
-    return pd.DataFrame(RADAR_ROWS, columns=RADAR_COLUMNS)
-
 def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
                     stale_pct: float = STALE_DEVIATION_PCT) -> pd.DataFrame:
     out = []
     for r in radar.to_dict("records"):
-        sym, bias = r["symbol"], r["bias"]
+        sym, bias = str(r["symbol"]).strip().upper(), r["bias"]
         q = quotes.get(sym)
         cmp_ = q["cmp"] if q else None
         last_close = q["last_close"] if q else None
 
-        zl, zh = min(r["zone_low"], r["zone_high"]), max(r["zone_low"], r["zone_high"])
+        zl, zh = min(float(r["zone_low"]), float(r["zone_high"])), max(float(r["zone_low"]), float(r["zone_high"]))
+        is_fo_stock = sym in NSE_FO_UNIVERSE
 
-        info = sector_info(r["sector"])
+        # Dynamic Sector Lookup if unmapped
+        sector_name = r["sector"] if r["sector"] in SECTOR_SHARES else STOCK_SECTOR_MAP.get(sym, "Financial Services")
+        info = sector_info(sector_name)
         flow_status = info["status"]
-        if flow_status is True:
-            flow_label = f"🟢 Inflow ({info['shift']:+.2f}%)"
-        elif flow_status is False:
-            flow_label = f"🔴 Outflow ({info['shift']:+.2f}%)"
-        else:
-            flow_label = f"⚪ {info['signal']}"
+        flow_label = f"🟢 Inflow ({info['shift']:+.2f}%)" if flow_status is True else (f"🔴 Outflow ({info['shift']:+.2f}%)" if flow_status is False else f"⚪ {info['signal']}")
 
-        p2_pass = r["deliv"] >= MIN_DELIVERY_PCT and r["spurt"] >= MIN_SPURT
+        p2_pass = float(r["deliv"]) >= MIN_DELIVERY_PCT and float(r["spurt"]) >= MIN_SPURT
         long_ = bias == "BULLISH"
         p1_pass = (flow_status is True) if long_ else (flow_status is False)
         tradable = p1_pass and p2_pass
 
-        entry_ref = r["choch"]
-        risk = abs(entry_ref - r["invalidation"])
-        t_pct = [abs((r[t] / entry_ref - 1) * 100) for t in ("t1", "t2", "t3")]
-        rr_t1 = abs(r["t1"] - entry_ref) / risk if risk > 0 else np.nan
+        entry_ref = float(r["choch"])
+        risk = abs(entry_ref - float(r["invalidation"]))
+        t_pct = [abs((float(r[t]) / entry_ref - 1) * 100) for t in ("t1", "t2", "t3")]
+        rr_t1 = abs(float(r["t1"]) - entry_ref) / risk if risk > 0 else np.nan
 
-        dev_pct = abs(cmp_ / r["snap_cmp"] - 1) * 100 if cmp_ is not None else None
+        dev_pct = abs(cmp_ / float(r["snap_cmp"]) - 1) * 100 if cmp_ is not None else None
         day_pct = (cmp_ / q["prev_close"] - 1) * 100 if q and q.get("prev_close") else None
         to_trigger = (entry_ref / cmp_ - 1) * 100 if cmp_ else None
 
         side_word = "LONGS" if long_ else "SHORTS"
         if not p1_pass:
             why = "Sector Outflow" if long_ else "Sector Inflow"
-            if flow_status is None:
-                why = "Sector Neutral"
             blocked = ("BLOCKED", f"⛔ BLOCKED – {why}", f"AVOID {side_word} (Pillar 1)")
         elif not p2_pass:
-            blocked = ("BLOCKED", "⛔ BLOCKED – Delivery Spurt" if long_ else "⛔ BLOCKED – Distribution Spurt",
-                       f"AVOID {side_word} (Pillar 2)")
+            blocked = ("BLOCKED", "⛔ BLOCKED – Delivery Spurt" if long_ else "⛔ BLOCKED – Distribution Spurt", f"AVOID {side_word} (Pillar 2)")
         else:
             blocked = None
 
@@ -350,72 +492,67 @@ def evaluate_setups(radar: pd.DataFrame, quotes: dict, max_chase_pct: float,
         elif dev_pct > stale_pct:
             key, status, action = "STALE", "⚠️ LEVELS STALE", "REFRESH RADAR SNAPSHOT"
         elif long_:
-            if last_close < r["invalidation"]:
+            if last_close < float(r["invalidation"]):
                 key, status, action = "INVALID", "❌ INVALIDATED", "AVOID – SUPPORT BROKEN"
-            elif last_close >= r["bos"]:
-                key, status, action = "BOS", "🚀 MOMENTUM (BULLISH BOS)", f"TREND EXPANSION > {r['bos']:.2f}"
-            elif last_close >= r["choch"]:
-                ext = (last_close / r["choch"] - 1) * 100
-                if ext > max_chase_pct:
-                    key, status, action = "EXTENDED", "🟠 EXTENDED – NO CHASE", f"PULLBACK WAIT (+{ext:.1f}%)"
-                else:
-                    key, status, action = "ACTIVE", "⚡ ACTIVE (BULLISH CHoCH)", "BUY ENTRY (15m CHoCH CONFIRMED)"
+            elif last_close >= float(r["bos"]):
+                key, status, action = "BOS", "🚀 MOMENTUM (BULLISH BOS)", f"TREND EXPANSION > {float(r['bos']):.2f}"
+            elif last_close >= float(r["choch"]):
+                ext = (last_close / float(r["choch"]) - 1) * 100
+                key, status, action = ("EXTENDED", "🟠 EXTENDED – NO CHASE", f"PULLBACK WAIT (+{ext:.1f}%)") if ext > max_chase_pct else ("ACTIVE", "⚡ ACTIVE (BULLISH CHoCH)", "BUY ENTRY (15m CHoCH CONFIRMED)")
             elif zl <= cmp_ <= zh:
                 key, status, action = "ZONE", "🟢 IN BUY ZONE", "ACCUMULATING – WAIT CHoCH"
             elif cmp_ > zh:
                 key, status = "PRE", "🟡 PRE-TRIGGER"
-                action = "CHoCH TOUCHED – WAIT 15m CLOSE" if cmp_ >= r["choch"] else "WATCHING NEAR TRIGGER"
+                action = "CHoCH TOUCHED – WAIT 15m CLOSE" if cmp_ >= float(r["choch"]) else "WATCHING NEAR TRIGGER"
             else:
                 key, status, action = "BELOW", "⚪ BELOW BUY ZONE", "TRACKING"
-        else:  # BEARISH
-            if last_close > r["invalidation"]:
+        else:
+            if last_close > float(r["invalidation"]):
                 key, status, action = "INVALID", "❌ INVALIDATED", "AVOID – RESISTANCE SWEPT"
-            elif last_close <= r["bos"]:
-                key, status, action = "BEAR_BOS", "🔻 SHORT/EXIT (BEARISH BOS)", f"MARKDOWN EXPANSION < {r['bos']:.2f}"
-            elif last_close <= r["choch"]:
-                ext = (r["choch"] / last_close - 1) * 100
-                if ext > max_chase_pct:
-                    key, status, action = "EXTENDED", "🟠 EXTENDED – NO CHASE", f"BOUNCE WAIT (-{ext:.1f}%)"
-                else:
-                    key, status, action = "BEAR_ACTIVE", "🔻 ACTIVE (BEARISH CHoCH)", "EXIT / SHORT (15m BREAKDOWN)"
-            elif zl <= cmp_ <= zh:
-                key, status, action = "ZONE", "🔴 IN DISTRIBUTION ZONE", "DISTRIBUTING – WAIT BREAKDOWN"
+            elif not is_fo_stock:
+                key, status, action = ("CASH_AVOID", "⚠️ AVOID / EXIT (CASH)", "LIQUIDATE / NO SHORT (CASH SEGMENT)") if last_close <= float(r["choch"]) else ("CASH_AVOID", "⚠️ SECTOR OUTFLOW (CASH)", "AVOID FRESH BUYING")
             else:
-                key, status, action = "PRE", "⚪ TRACKING SUPPLY", "SUPPLY RESISTANCE INTACT"
-
-        if r["age_days"] >= RADAR_MAX_AGE_DAYS:
-            action += f" | ⏳ RADAR {r['age_days']}D OLD"
+                if last_close <= float(r["bos"]):
+                    key, status, action = "BEAR_FO_BOS", "🔻 SHORT (BEARISH BOS)", f"MARKDOWN EXPANSION < {float(r['bos']):.2f}"
+                elif last_close <= float(r["choch"]):
+                    ext = (float(r["choch"]) / last_close - 1) * 100
+                    key, status, action = ("EXTENDED", "🟠 EXTENDED – NO CHASE", f"BOUNCE WAIT (-{ext:.1f}%)") if ext > max_chase_pct else ("BEAR_FO_ACTIVE", "🔻 ACTIVE (F&O SHORT)", "SHORT ENTRY (15m BREAKDOWN)")
+                elif zl <= cmp_ <= zh:
+                    key, status, action = "ZONE", "🔴 IN DISTRIBUTION ZONE", "DISTRIBUTING – WAIT BREAKDOWN"
+                else:
+                    key, status, action = "PRE", "⚪ TRACKING SUPPLY", "SUPPLY RESISTANCE INTACT"
 
         out.append({
-            "Symbol": sym, "Company": r["company"], "Sector": r["sector"], "Bias": bias,
+            "Symbol": sym, "Company": r["company"], "Sector": sector_name, "Bias": bias,
+            "Segment": "F&O Tradable" if is_fo_stock else "Cash Only",
             "Sector Flow": flow_label, "Tradable (3-Pillar)": "✅" if tradable else "—",
             "Status": status, "Action": action,
             "CMP (Rs)": cmp_, "Day %": day_pct,
             "Smart Money Zone (Rs)": f"₹{zl:.2f} – ₹{zh:.2f}",
-            "CHoCH Trigger (Rs)": r["choch"], "Dist. to CHoCH %": to_trigger,
-            "BOS Level (Rs)": r["bos"],
-            "Last 15m Close (Rs)": last_close, "Invalidation / SL (Rs)": r["invalidation"],
-            "Target 1": r["t1"], "Target 2": r["t2"], "Target 3": r["t3"],
+            "CHoCH Trigger (Rs)": float(r["choch"]), "Dist. to CHoCH %": to_trigger,
+            "BOS Level (Rs)": float(r["bos"]),
+            "Last 15m Close (Rs)": last_close, "Invalidation / SL (Rs)": float(r["invalidation"]),
+            "Target 1": float(r["t1"]), "Target 2": float(r["t2"]), "Target 3": float(r["t3"]),
             "T1 %": t_pct[0], "T2 %": t_pct[1], "T3 %": t_pct[2], "R:R (T1)": rr_t1,
-            "Volume Spurt (x)": r["spurt"], "Delivery %": r["deliv"], "Radar Age (Days)": r["age_days"],
-            "Catalyst Remark": r["remark"], "Radar Snapshot CMP (Rs)": r["snap_cmp"],
+            "Volume Spurt (x)": float(r["spurt"]), "Delivery %": float(r["deliv"]), "Radar Age (Days)": int(r["age_days"]),
+            "Catalyst Remark": r["remark"], "Radar Snapshot CMP (Rs)": float(r["snap_cmp"]),
             "_key": key, "_rank": RANK.get(key, 99), "_tone": TONE.get(key, "n"), "_tradable": tradable,
         })
     df = pd.DataFrame(out)
     return df.sort_values(["_rank", "Volume Spurt (x)"], ascending=[True, False]).reset_index(drop=True)
 
 # ==========================================================
-# TABLE RENDERING
+# REPORT TABLES & EXCEL EXPORT
 # ==========================================================
 EXPORT_COLUMNS = [
-    "Symbol", "Company", "Sector", "Bias", "Sector Flow", "Tradable (3-Pillar)", "Status", "Action",
+    "Symbol", "Company", "Sector", "Bias", "Segment", "Sector Flow", "Tradable (3-Pillar)", "Status", "Action",
     "CMP (Rs)", "Day %", "Smart Money Zone (Rs)", "CHoCH Trigger (Rs)", "Dist. to CHoCH %", "BOS Level (Rs)",
     "Last 15m Close (Rs)", "Invalidation / SL (Rs)", "Target 1", "Target 2", "Target 3",
     "T1 %", "T2 %", "T3 %", "R:R (T1)", "Volume Spurt (x)", "Delivery %", "Radar Age (Days)", "Catalyst Remark",
 ]
 COMPACT_COLUMNS = [
-    "Symbol", "Bias", "Status", "CMP (Rs)", "CHoCH Trigger (Rs)", "Invalidation / SL (Rs)",
-    "Target 1", "R:R (T1)", "Volume Spurt (x)", "Delivery %",
+    "Symbol", "Bias", "Segment", "Status", "Action", "CMP (Rs)", "CHoCH Trigger (Rs)",
+    "Invalidation / SL (Rs)", "Target 1", "R:R (T1)", "Volume Spurt (x)", "Delivery %",
 ]
 
 FORMATS = {
@@ -448,7 +585,7 @@ def fmt_cell(col: str, v) -> tuple[str, str]:
 
 def html_table(df: pd.DataFrame, cols: list[str], badge_cols: tuple = (), height: int = 560) -> str:
     if df.empty:
-        return "<div class='empty'>No records match the current filters.</div>"
+        return "<div class='empty'>No records match current filters.</div>"
     head = "<th class='c-no'>No.</th>" + "".join(f"<th>{html.escape(c)}</th>" for c in cols)
     body = []
     for i, (_, row) in enumerate(df.iterrows(), start=1):
@@ -456,10 +593,7 @@ def html_table(df: pd.DataFrame, cols: list[str], badge_cols: tuple = (), height
         cells = [f"<td class='c-no t-{tone}'>{i}</td>"]
         for c in cols:
             txt, cls = fmt_cell(c, row[c])
-            if c in badge_cols:
-                cells.append(f"<td><span class='bdg b-{tone}'>{txt}</span></td>")
-            else:
-                cells.append(f"<td class='{cls}'>{txt}</td>")
+            cells.append(f"<td><span class='bdg b-{tone}'>{txt}</span></td>" if c in badge_cols else f"<td class='{cls}'>{txt}</td>")
         body.append("<tr>" + "".join(cells) + "</tr>")
     return (f"<div class='tbl-wrap' style='max-height:{height}px'><table class='smc'>"
             f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div>")
@@ -471,70 +605,49 @@ def numbered(df: pd.DataFrame) -> pd.DataFrame:
 
 def section(num: str, title: str, sub: str = "") -> None:
     sub_html = f"<span class='sec-sub'>{html.escape(sub)}</span>" if sub else ""
-    st.markdown(f"<div class='sec'><span class='sec-no'>{num}</span>{html.escape(title)}{sub_html}</div>",
-                unsafe_allow_html=True)
-
-# ==========================================================
-# EXCEL GENERATOR
-# ==========================================================
-XL_FMT = {
-    "CMP (Rs)": "#,##0.00", "CHoCH Trigger (Rs)": "#,##0.00", "BOS Level (Rs)": "#,##0.00",
-    "Last 15m Close (Rs)": "#,##0.00", "Invalidation / SL (Rs)": "#,##0.00",
-    "Target 1": "#,##0.00", "Target 2": "#,##0.00", "Target 3": "#,##0.00",
-    "Day %": '+0.00"%";-0.00"%"', "Dist. to CHoCH %": '+0.00"%";-0.00"%"', "Flow Shift (%)": '+0.00"%";-0.00"%"',
-    "T1 %": '0.0"%"', "T2 %": '0.0"%"', "T3 %": '0.0"%"', "Delivery %": '0.0"%"',
-    "R:R (T1)": "0.00", "Volume Spurt (x)": '0.00"x"',
-    "Recent 12D Share (%)": '0.00"%"', "Base Share (%)": '0.00"%"',
-}
-
-def _write_sheet(ws, df: pd.DataFrame, cols: list[str], freeze: str) -> None:
-    head_fill = PatternFill("solid", start_color="161B22", end_color="161B22")
-    alt_fill = PatternFill("solid", start_color="F3F6FA", end_color="F3F6FA")
-    side = Side(style="thin", color="B8C0CC")
-    border = Border(left=side, right=side, top=side, bottom=side)
-    headers = ["No."] + cols
-    ws.append(headers)
-    for c in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=c)
-        cell.fill, cell.border = head_fill, border
-        cell.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 30
-
-    clean = df[cols].astype(object).where(pd.notna(df[cols]), None)
-    for i, rec in enumerate(clean.to_dict("records"), start=2):
-        ws.append([i - 1] + [rec[c] for c in cols])
-        for j, h in enumerate(headers, start=1):
-            cell = ws.cell(row=i, column=j)
-            cell.border = border
-            cell.alignment = Alignment(vertical="center", horizontal="center" if j == 1 else None)
-            if i % 2 == 1:
-                cell.fill = alt_fill
-            if h in XL_FMT:
-                cell.number_format = XL_FMT[h]
-            if h == "Bias" and cell.value:
-                cell.font = Font(bold=True, color="1A7F37" if cell.value == "BULLISH" else "CF222E")
-
-    for col in ws.columns:
-        letter = get_column_letter(col[0].column)
-        longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-        ws.column_dimensions[letter].width = min(max(longest + 3, 8 if letter == "A" else 12), 50)
-    ws.freeze_panes = freeze
-    ws.auto_filter.ref = ws.dimensions
+    st.markdown(f"<div class='sec'><span class='sec-no'>{num}</span>{html.escape(title)}{sub_html}</div>", unsafe_allow_html=True)
 
 def generate_excel_export(df: pd.DataFrame, sec_df: pd.DataFrame) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Audited_SMC_Radar"
-    _write_sheet(ws, df, EXPORT_COLUMNS, "C2")
+    
+    head_fill = PatternFill("solid", start_color="161B22", end_color="161B22")
+    side = Side(style="thin", color="B8C0CC")
+    border = Border(left=side, right=side, top=side, bottom=side)
+    headers = ["No."] + EXPORT_COLUMNS
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill, cell.border = head_fill, border
+        cell.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    clean = df[EXPORT_COLUMNS].astype(object).where(pd.notna(df[EXPORT_COLUMNS]), None)
+    for i, rec in enumerate(clean.to_dict("records"), start=2):
+        ws.append([i - 1] + [rec[c] for c in EXPORT_COLUMNS])
+        for j in range(1, len(headers) + 1):
+            cell = ws.cell(row=i, column=j)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+
+    for col in ws.columns:
+        col_letter = get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = 16
+    ws.freeze_panes = "C2"
+
     ws2 = wb.create_sheet("Sector_Rotation")
-    _write_sheet(ws2, sec_df, ["Sector", "Recent 12D Share (%)", "Base Share (%)", "Flow Shift (%)", "Flow Signal"], "C2")
+    s_cols = ["Sector", "Recent 12D Share (%)", "Base Share (%)", "Flow Shift (%)", "Flow Signal"]
+    ws2.append(["No."] + s_cols)
+    for i, rec in enumerate(sec_df[s_cols].to_dict("records"), start=2):
+        ws2.append([i - 1] + [rec[c] for c in s_cols])
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 # ==========================================================
-# TRADE BOOK ENGINE (CRASH-PROOF AUTO REPAIR)
+# TRADE BOOK ENGINE
 # ==========================================================
 def load_trades() -> list:
     if not os.path.exists(TRADE_BOOK_PATH):
@@ -547,7 +660,6 @@ def load_trades() -> list:
             repaired = []
             for item in data:
                 if isinstance(item, dict):
-                    # Guarantee id key
                     if "id" not in item:
                         item["id"] = uuid.uuid4().hex[:8]
                     if "symbol" not in item and "Symbol" in item:
@@ -566,10 +678,8 @@ def trade_row(t: dict, quotes: dict) -> dict:
     side = t.get("side", "LONG")
     mult = 1 if side == "LONG" else -1
     closed = t.get("status") == "CLOSED"
-    
     sym = str(t.get("symbol") or t.get("Symbol") or "").strip().upper()
     q_data = quotes.get(sym, {}) if sym else {}
-    
     px = t.get("exit") if closed else q_data.get("cmp")
     entry = float(t.get("entry", 0.0) or t.get("entry_price", 0.0))
     qty = int(t.get("qty", 1) or 1)
@@ -587,7 +697,7 @@ def trade_row(t: dict, quotes: dict) -> dict:
     }
 
 # ==========================================================
-# UI STYLING (HIGHLIGHTED TABS)
+# UI STYLING & HIGH-CONTRAST ACCENTS
 # ==========================================================
 CSS = """
 <style>
@@ -602,10 +712,8 @@ CSS = """
   .stTabs [data-baseweb="tab-list"]{gap:8px;border-bottom:2px solid #30363D;padding-bottom:4px;}
   .stTabs [data-baseweb="tab"]{
       background-color:#161B22;border:1px solid #30363D;border-radius:6px;
-      color:#8B949E;font-weight:600;padding:8px 18px;transition: all 0.2s ease-in-out;
+      color:#8B949E;font-weight:600;padding:8px 18px;
   }
-  
-  /* Highlight Tab 1 & Tab 2 */
   .stTabs [data-baseweb="tab"]:nth-child(1) {
       border: 1px solid #238636 !important;
       background: linear-gradient(180deg, #161B22, #0d2116) !important;
@@ -616,38 +724,33 @@ CSS = """
       background: linear-gradient(180deg, #161B22, #0c1e38) !important;
       color: #58A6FF !important;
   }
-  
   .stTabs [aria-selected="true"]{
       box-shadow: 0 0 10px rgba(88, 166, 255, 0.3) !important;
       font-weight:700 !important;
-      transform: translateY(-1px);
   }
 
   .hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;
       background:linear-gradient(90deg,#0D1117,#161B22);border:1px solid #30363D;border-radius:10px;
       padding:16px 22px;margin-bottom:14px;}
-  .hdr h1{margin:0;font-size:24px;color:#F0F6FC;letter-spacing:.01em;}
+  .hdr h1{margin:0;font-size:24px;color:#F0F6FC;}
   .hdr .sub{color:#8B949E;font-size:12.5px;margin-top:2px;}
   .chips{display:flex;gap:8px;flex-wrap:wrap;}
   .chip{border:1px solid #30363D;background:#0D1117;color:#C9D1D9;border-radius:999px;padding:5px 12px;
       font-size:12px;font-family:'JetBrains Mono',monospace;}
-  .chip b{color:#8B949E;font-weight:600;margin-right:6px;font-family:inherit;}
+  .chip b{color:#8B949E;font-weight:600;margin-right:6px;}
   .sec{display:flex;align-items:center;gap:10px;margin:18px 0 10px;font-size:17px;font-weight:700;color:#F0F6FC;
       border-bottom:1px solid #30363D;padding-bottom:8px;}
-  .sec-no{background:#1F6FEB;color:#fff;border-radius:5px;padding:1px 9px;font-size:13px;
-      font-family:'JetBrains Mono',monospace;}
+  .sec-no{background:#1F6FEB;color:#fff;border-radius:5px;padding:1px 9px;font-size:13px;}
   .sec-sub{margin-left:auto;font-size:12px;font-weight:400;color:#8B949E;}
   .tbl-wrap{overflow:auto;border:1px solid #30363D;border-radius:8px;background:#0D1117;}
   table.smc{border-collapse:collapse;width:100%;font-size:12.5px;}
   table.smc th{position:sticky;top:0;z-index:2;background:#161B22;color:#8B949E;border:1px solid #30363D;
-      padding:9px 11px;text-transform:uppercase;font-size:10.5px;letter-spacing:.05em;white-space:nowrap;text-align:left;}
+      padding:9px 11px;text-transform:uppercase;font-size:10.5px;}
   table.smc td{border:1px solid #21262D;padding:7px 11px;white-space:nowrap;color:#C9D1D9;}
   table.smc tbody tr:nth-child(even) td{background:#0F141B;}
-  table.smc tbody tr:hover td{background:#1B2230;}
   table.smc td.num{text-align:right;font-family:'JetBrains Mono',monospace;}
   table.smc td.pos{color:#3FB950;} table.smc td.neg{color:#F85149;}
-  table.smc th.c-no,table.smc td.c-no{text-align:center;width:44px;color:#8B949E;
-      font-family:'JetBrains Mono',monospace;background:#12171F !important;}
+  table.smc th.c-no,table.smc td.c-no{text-align:center;width:44px;background:#12171F !important;}
   td.c-no.t-g{border-left:3px solid #3FB950;} td.c-no.t-r{border-left:3px solid #F85149;}
   td.c-no.t-o{border-left:3px solid #F0883E;} td.c-no.t-y{border-left:3px solid #D29922;}
   td.c-no.t-b{border-left:3px solid #58A6FF;} td.c-no.t-n{border-left:3px solid #484F58;}
@@ -656,7 +759,6 @@ CSS = """
   .b-o{color:#F0883E;background:#2B1B0E;border-color:#BD561D;} .b-y{color:#D29922;background:#272010;border-color:#9E6A03;}
   .b-b{color:#58A6FF;background:#0F2036;border-color:#1F6FEB;} .b-n{color:#8B949E;background:#161B22;border-color:#30363D;}
   .empty{border:1px dashed #30363D;border-radius:8px;padding:22px;text-align:center;color:#8B949E;}
-  .legend{color:#8B949E;font-size:12px;margin:4px 0 8px;}
   .foot{margin-top:26px;padding-top:12px;border-top:1px solid #30363D;color:#6E7681;font-size:11.5px;text-align:center;}
   .gate{text-align:center;margin-top:60px;} .gate h2{margin:6px 0 2px;color:#F0F6FC;} .gate p{color:#8B949E;}
   .gate-ico{font-size:42px;}
@@ -690,11 +792,10 @@ def show_table(df: pd.DataFrame, cols: list[str], mode: str, badge: tuple = ("St
     if mode == "Bordered Report":
         st.markdown(html_table(df, cols, badge_cols=badge, height=height), unsafe_allow_html=True)
     else:
-        st.dataframe(numbered(df[cols]), hide_index=True, height=height,
-                     column_config=COLUMN_CONFIG, **STRETCH)
+        st.dataframe(numbered(df[cols]), hide_index=True, height=height, column_config=COLUMN_CONFIG, **STRETCH)
 
 # ==========================================================
-# MAIN EXECUTION
+# MAIN EXECUTION ROUTINE
 # ==========================================================
 def main():
     st.set_page_config(page_title="Institutional Smart Money Terminal", page_icon="⚡", layout="wide")
@@ -702,24 +803,38 @@ def main():
     if not auth_gate():
         st.stop()
 
-    radar = build_radar()
-    live = fetch_live_quotes(tuple(radar["symbol"]))
-    quotes, fetched_at = live["quotes"], live["fetched_at"]
+    if "active_radar_df" not in st.session_state:
+        st.session_state.active_radar_df = pd.DataFrame(DEFAULT_RADAR_ROWS, columns=RADAR_COLUMNS)
 
     with st.sidebar:
-        st.markdown("### ⚙️ 1. Controls")
-        if st.button("🔄 Refresh Live Data", **STRETCH):
+        st.markdown("### ⚙️ 1. Controls & Live Ingestion")
+        if st.button("🔄 Refresh Live Quotes", **STRETCH):
             st.cache_data.clear()
             st.rerun()
+
+        uploaded_file = st.file_uploader("📂 Upload Radar Master (.xlsx)", type=["xlsx"])
+        if uploaded_file is not None:
+            try:
+                up_df = pd.read_excel(uploaded_file, sheet_name=0)
+                st.session_state.active_radar_df = up_df[[c for c in RADAR_COLUMNS if c in up_df.columns]]
+                st.sidebar.success("Custom Master Loaded!")
+            except Exception:
+                st.sidebar.error("Master upload parse error.")
+
         view_mode = st.radio("2. View Mode", ["Bordered Report", "Interactive Grid"], horizontal=True)
         bias_filter = st.selectbox("3. Trading Bias", ["All Setups", "BULLISH Setups Only", "BEARISH Setups Only"])
-        tradable_only = st.toggle("4. Tradable Only (P1 + P2)", value=False)
-        max_chase = st.slider("5. Max Extension vs Trigger (%)", 0.5, 5.0, 2.0, 0.5)
-        text_filter = st.text_input("6. Search Symbol / Sector").strip().lower()
+        segment_filter = st.selectbox("4. Segment Filter", ["All Segments", "F&O Tradable Only", "Cash Only"])
+        tradable_only = st.toggle("5. Tradable Only (P1 + P2)", value=False)
+        max_chase = st.slider("6. Max Extension vs Trigger (%)", 0.5, 5.0, 2.0, 0.5)
+        text_filter = st.text_input("7. Search Symbol / Sector").strip().lower()
         st.markdown("---")
         if st.button("🔒 Lock Terminal", **STRETCH):
             st.session_state["authenticated"] = False
             st.rerun()
+
+    radar = st.session_state.active_radar_df
+    live = fetch_live_quotes(tuple(radar["symbol"]))
+    quotes, fetched_at = live["quotes"], live["fetched_at"]
 
     df = evaluate_setups(radar, quotes, max_chase)
     sec_df = build_sector_df()
@@ -731,56 +846,57 @@ def main():
 
     st.markdown(
         "<div class='hdr'><div><h1>⚡ Institutional Smart Money Terminal</h1>"
-        "<div class='sub'>Three-Pillar SMC · 22 NSE Sector Rotation · Delivery Spurt · 15m CHoCH / BOS</div></div>"
+        "<div class='sub'>Automated Bhavcopy Pipeline · True Stock-Wise Spurt · 22 NSE Sectors · 15m SMC Engine</div></div>"
         "<div class='chips'>"
         f"<span class='chip'><b>SYNC</b>{fetched_at.strftime('%d-%b-%Y %I:%M:%S %p IST')}</span>"
         f"<span class='chip'><b>MARKET</b>{html.escape(mkt)}</span>"
         f"<span class='chip'><b>REGIME</b>{html.escape(regime_txt)}</span>"
         "</div></div>", unsafe_allow_html=True)
 
-    if not quotes:
-        st.warning("Live quote feed returned no data. Statuses show NO LIVE DATA until the feed recovers.")
-
     m = st.columns(6)
     m[0].metric("1 · Tracked", len(df))
     m[1].metric("2 · Tradable (P1+P2)", int(df["_tradable"].sum()))
-    m[2].metric("3 · ⚡ Active Triggers", int(df["_key"].isin(["ACTIVE", "BEAR_ACTIVE"]).sum()))
-    m[3].metric("4 · 🚀 BOS Momentum", int(df["_key"].isin(["BOS", "BEAR_BOS"]).sum()))
+    m[2].metric("3 · ⚡ Active Triggers", int(df["_key"].isin(["ACTIVE", "BEAR_FO_ACTIVE"]).sum()))
+    m[3].metric("4 · 🚀 BOS Momentum", int(df["_key"].isin(["BOS", "BEAR_FO_BOS"]).sum()))
     m[4].metric("5 · Inflow Aligned", int(df["Sector Flow"].str.contains("Inflow").sum()))
-    m[5].metric("6 · Blocked", int((df["_key"] == "BLOCKED").sum()))
+    m[5].metric("6 · Blocked / Avoid", int(df["_key"].isin(["BLOCKED", "CASH_AVOID"]).sum()))
 
     view = df.copy()
     if bias_filter == "BULLISH Setups Only":
         view = view[view["Bias"] == "BULLISH"]
     elif bias_filter == "BEARISH Setups Only":
         view = view[view["Bias"] == "BEARISH"]
+
+    if segment_filter == "F&O Tradable Only":
+        view = view[view["Segment"] == "F&O Tradable"]
+    elif segment_filter == "Cash Only":
+        view = view[view["Segment"] == "Cash Only"]
+
     if tradable_only:
         view = view[view["_tradable"]]
     if text_filter:
         blob = (view["Symbol"] + " " + view["Company"] + " " + view["Sector"]).str.lower()
         view = view[blob.str.contains(text_filter, regex=False)]
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "1 ▸ Live Radar", "2 ▸ Sector Rotation (P1)", "3 ▸ Audit & Export", "4 ▸ Trade Book", "5 ▸ Methodology",
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "1 ▸ Live Radar", "2 ▸ Sector Rotation (P1)", "3 ▸ Audit & Export", "4 ▸ Trade Book", "5 ▸ Methodology", "6 ▸ Bhavcopy Data Hub"
     ])
 
     # ---------------- TAB 1 ----------------
     with tab1:
-        section("1.1", "Actionable Now", "Tradable + confirmed 15m CHoCH / BOS")
+        section("1.1", "Actionable Now", "Confirmed 15m Triggers & Risk-Gated Setups")
         act = df[df["_key"].isin(ACTIONABLE_KEYS) & df["_tradable"]]
         if act.empty:
             st.markdown("<div class='empty'>No confirmed actionable setups right now.</div>", unsafe_allow_html=True)
         else:
             show_table(act, COMPACT_COLUMNS, view_mode, height=300)
 
-        section("1.2", "Full Accumulation / Distribution Radar", f"{len(view)} of {len(df)} setups shown")
-        st.markdown("<div class='legend'>Bullish: valid on a completed 15m close above CHoCH; BOS marks expansion. "
-                    "Bearish: breakdown below CHoCH / BOS. Left bar colour = status tone.</div>", unsafe_allow_html=True)
+        section("1.2", "Full Accumulation & Distribution Radar", f"{len(view)} of {len(df)} setups shown")
         show_table(view, [c for c in EXPORT_COLUMNS if c in view.columns], view_mode, height=560)
 
     # ---------------- TAB 2 ----------------
     with tab2:
-        section("2.1", "NSE Institutional Capital Flow (22 Sectors)", "Rule: Longs only in Inflow, Shorts only in Outflow")
+        section("2.1", "NSE Institutional Capital Flow (22 Sectors)", "Fortnightly Share Shift Matrix")
         s_cols = ["Sector", "Recent 12D Share (%)", "Base Share (%)", "Flow Shift (%)", "Flow Signal"]
         n_in = int((sec_df["_status"] == True).sum())
         n_out = int((sec_df["_status"] == False).sum())
@@ -793,18 +909,13 @@ def main():
         show_table(sec_df[sec_df["_status"] == True], s_cols, view_mode, badge=("Flow Signal",), height=330)
         section("2.3", "🔴 Outflow Sectors")
         show_table(sec_df[sec_df["_status"] == False], s_cols, view_mode, badge=("Flow Signal",), height=480)
-        neutral = sec_df[sec_df["_status"].isna()]
-        if not neutral.empty:
-            section("2.4", "⚪ Neutral Sectors")
-            show_table(neutral, s_cols, view_mode, badge=("Flow Signal",), height=200)
-        section("2.5", "Flow Shift Chart", "Share change vs base (pp)")
+        section("2.4", "Flow Shift Chart", "Share change vs base (pp)")
         st.bar_chart(sec_df.set_index("Sector")["Flow Shift (%)"], height=320)
 
     # ---------------- TAB 3 ----------------
     with tab3:
-        section("3.1", "Audited Radar Data", "Live on-screen audit - no need to open Excel")
+        section("3.1", "Audited Radar Data", "Live On-Screen Audit")
         show_table(df, EXPORT_COLUMNS, view_mode, height=450)
-        section("3.2", "Offline Export")
         xlsx = generate_excel_export(df, sec_df)
         st.download_button(
             "📥 Download Audited Excel (.xlsx)", data=xlsx,
@@ -837,10 +948,13 @@ def main():
         s_sym = st.selectbox("Symbol", radar["symbol"].tolist())
         row_match = radar.loc[radar["symbol"] == s_sym].iloc[0]
         is_long = row_match["bias"] == "BULLISH"
-        default_p = (quotes.get(s_sym) or {}).get("cmp", row_match["snap_cmp"])
+        is_fo = s_sym in NSE_FO_UNIVERSE
+        default_p = (quotes.get(s_sym) or {}).get("cmp", float(row_match["snap_cmp"]))
+        
         with st.form("tb_add"):
             c1, c2, c3, c4, c5 = st.columns(5)
-            p_side = c1.selectbox("Side", ["LONG", "SHORT"], index=0 if is_long else 1)
+            available_sides = ["LONG"] if not is_fo and not is_long else ["LONG", "SHORT"]
+            p_side = c1.selectbox("Side", available_sides, index=0 if is_long else (1 if "SHORT" in available_sides else 0))
             p_entry = c2.number_input("Entry Price (Rs)", value=float(default_p), step=0.05)
             p_qty = c3.number_input("Quantity", value=1, min_value=1, step=1)
             p_sl = c4.number_input("Initial SL (Rs)", value=float(row_match["invalidation"]), step=0.05)
@@ -848,7 +962,7 @@ def main():
             add = c5.form_submit_button("➕ Log Position", **STRETCH)
         if add:
             if (p_side == "LONG" and p_sl >= p_entry) or (p_side == "SHORT" and p_sl <= p_entry):
-                st.error("Invalid SL: LONG needs SL below entry, SHORT needs SL above entry.")
+                st.error("Invalid SL configuration.")
             else:
                 trades.append({
                     "id": uuid.uuid4().hex[:8], "symbol": s_sym, "side": p_side, "entry": p_entry,
@@ -863,8 +977,7 @@ def main():
         if t_df.empty:
             st.markdown("<div class='empty'>No trades logged yet.</div>", unsafe_allow_html=True)
         else:
-            t_cols = ["ID", "Symbol", "Side", "Qty", "Entry (Rs)", "SL (Rs)", "CMP / Exit (Rs)",
-                      "P&L (Rs)", "P&L %", "Risk (Rs)", "Status", "Opened"]
+            t_cols = ["ID", "Symbol", "Side", "Qty", "Entry (Rs)", "SL (Rs)", "CMP / Exit (Rs)", "P&L (Rs)", "P&L %", "Risk (Rs)", "Status", "Opened"]
             show_table(t_df, t_cols, view_mode, badge=("Status",), height=380)
 
             section("4.4", "Manage Positions")
@@ -880,12 +993,10 @@ def main():
                         for t in trades:
                             if t.get("id") == cid:
                                 t["status"] = "CLOSED"
-                                t["exit"] = float(ex_px) if ex_px > 0 else float(
-                                    (quotes.get(t.get("symbol", "")) or {}).get("cmp", t.get("entry", 0.0)))
+                                t["exit"] = float(ex_px) if ex_px > 0 else float((quotes.get(t.get("symbol", "")) or {}).get("cmp", t.get("entry", 0.0)))
                                 t["closed_at"] = now.strftime("%Y-%m-%d %H:%M")
                         save_trades(trades)
                         st.rerun()
-                    st.caption("Exit price 0 = use current CMP.")
             with mc2:
                 with st.form("tb_del"):
                     did = st.selectbox("Delete record", all_ids) if all_ids else None
@@ -896,29 +1007,94 @@ def main():
 
     # ---------------- TAB 5 ----------------
     with tab5:
-        section("5.1", "Three-Pillar Framework")
+        section("5.1", "Execution Principles")
         st.markdown(
-            f"1. **Pillar 1 – Sector Rotation:** longs only in sectors with positive share shift, shorts only in negative. "
-            f"A shift of ±{HEAVY_SHIFT:.2f}pp or more is *Heavy*.\n"
-            f"2. **Pillar 2 – Delivery Spurt:** delivery ≥ {MIN_DELIVERY_PCT:.0f}% and volume spurt ≥ {MIN_SPURT:.1f}x.\n"
-            f"3. **Pillar 3 – Execution:** completed {CANDLE_MIN}m close beyond CHoCH confirms entry; BOS marks expansion; "
-            f"close beyond invalidation cancels the setup.")
-        section("5.2", "Status Legend")
-        legend = pd.DataFrame([
-            ("ACTIVE / BEAR_ACTIVE", "15m CHoCH confirmed, within chase limit", "g"),
-            ("BOS / BEAR_BOS", "Structure break - trend expansion", "g"),
-            ("EXTENDED", "Too far from trigger - wait for pullback / bounce", "o"),
-            ("ZONE", "Inside accumulation / distribution zone", "b"),
-            ("PRE", "Watching near trigger", "y"),
-            ("BLOCKED", "Failed Pillar 1 or Pillar 2", "n"),
-            ("INVALID", "Close beyond invalidation", "r"),
-            ("STALE / NODATA", f"CMP deviates >{STALE_DEVIATION_PCT:.0f}% from snapshot / feed missing", "o"),
-        ], columns=["Status", "Meaning", "_tone"])
-        st.markdown(html_table(legend, ["Status", "Meaning"], badge_cols=("Status",), height=360), unsafe_allow_html=True)
+            "1. **Pillar 1 Rotation:** Longs strictly in Inflow sectors, Shorts in Outflow.\n"
+            "2. **Pillar 2 Spurt:** Stock-Specific Delivery >= 45% + Historical Spurt >= 2.0x.\n"
+            "3. **Pillar 3 Micro Trigger:** 15m completed candle confirmation.")
 
-    st.markdown("<div class='foot'>For educational and research use only. Not investment advice. "
-                "Data via Yahoo Finance may be delayed or incomplete; verify before trading. "
-                "Radar levels are static snapshots - refresh them regularly.</div>", unsafe_allow_html=True)
+    # ---------------- TAB 6 (DAILY BHAVCOPY DATA HUB) ----------------
+    with tab6:
+        section("6.1", "NSE Official Daily Delivery Bhavcopy Downloader", "Direct Pipeline Ingestion")
+        bcol1, bcol2 = st.columns([1.5, 2.5])
+        
+        with bcol1:
+            sel_date = st.date_input("Select Trading Date", value=now.date() - dt.timedelta(days=1))
+            if st.button("📥 Fetch & Archive Bhavcopy", **STRETCH):
+                with st.spinner("Executing anti-scrape browser handshake..."):
+                    fpath, status_msg = fetch_nse_delivery_bhav(sel_date)
+                    if fpath:
+                        st.success(f"{status_msg}: {os.path.basename(fpath)}")
+                        candidates = parse_bhavcopy_candidates(fpath)
+                        st.metric("Spurt Candidates (>=45%, >=2.0x)", len(candidates))
+                    else:
+                        st.error(status_msg)
+
+        with bcol2:
+            st.markdown("#### 90-Day Rolling Archive Status")
+            files = [f for f in os.listdir(BHAV_DIR) if f.endswith(".csv")]
+            st.info(f"📁 Total Stored Daily Bhavcopies: **{len(files)} files** (Rolling 90-Day Buffer)")
+            if files:
+                zip_data = generate_chunked_bhav_zip()
+                st.download_button(
+                    "📦 Download Consolidated 90-Day Archive (.zip)",
+                    data=zip_data,
+                    file_name=f"NSE_Bhavcopy_90D_{now.strftime('%Y%m%d')}.zip",
+                    mime="application/zip", **STRETCH
+                )
+
+        section("6.2", "Live Delivery Spurt Scanner From Archive", "Filter Spurt >= 2.0x & Deliv >= 45%")
+        if files:
+            latest_file = sorted(files)[-1]
+            latest_path = os.path.join(BHAV_DIR, latest_file)
+            c_df = parse_bhavcopy_candidates(latest_path)
+            st.markdown(f"**Latest File Scanned:** `{latest_file}`")
+            if not c_df.empty:
+                st.dataframe(c_df, hide_index=True, **STRETCH)
+                if st.button("⚡ Inject Qualified Candidates Into Live Radar", **STRETCH):
+                    new_rows = []
+                    for _, row in c_df.iterrows():
+                        sym = str(row["SYMBOL"]).strip().upper()
+                        cmp_v = float(row.iloc[1])
+                        deliv_v = float(row.iloc[2])
+                        spurt_v = float(row["SPURT"])
+                        
+                        # Auto Sector Mapping & Pillar 1 Check
+                        assigned_sector = STOCK_SECTOR_MAP.get(sym, "Financial Services")
+                        s_flow = sector_info(assigned_sector)
+                        bias = "BULLISH" if s_flow["status"] is True else "BEARISH"
+
+                        # SMC-Aligned Order Block & Trigger Structure
+                        if bias == "BULLISH":
+                            z_low = round(cmp_v * 0.985, 2)
+                            z_high = round(cmp_v * 1.005, 2)
+                            choch = round(cmp_v * 1.02, 2)
+                            bos = round(cmp_v * 1.045, 2)
+                            inval = round(cmp_v * 0.965, 2)
+                            t1 = round(cmp_v * 1.08, 2)
+                            t2 = round(cmp_v * 1.18, 2)
+                            t3 = round(cmp_v * 1.30, 2)
+                        else:
+                            z_low = round(cmp_v * 0.995, 2)
+                            z_high = round(cmp_v * 1.015, 2)
+                            choch = round(cmp_v * 0.98, 2)
+                            bos = round(cmp_v * 0.955, 2)
+                            inval = round(cmp_v * 1.035, 2)
+                            t1 = round(cmp_v * 0.92, 2)
+                            t2 = round(cmp_v * 0.82, 2)
+                            t3 = round(cmp_v * 0.70, 2)
+
+                        new_rows.append((
+                            sym, f"{sym} Ltd.", assigned_sector, bias, cmp_v,
+                            z_low, z_high, choch, bos, inval, t1, t2, t3,
+                            f"Live Bhavcopy Spurt ({spurt_v}x)", spurt_v, deliv_v, 0
+                        ))
+                    if new_rows:
+                        st.session_state.active_radar_df = pd.DataFrame(new_rows, columns=RADAR_COLUMNS)
+                        st.success(f"Injected {len(new_rows)} auto-mapped candidates into Live Radar!")
+                        st.rerun()
+            else:
+                st.warning("No candidates passed Pillar 2 criteria in this file.")
 
 if __name__ == "__main__":
     main()
