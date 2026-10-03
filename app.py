@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import requests
+import numpy as np
 from datetime import datetime
 import pytz
 
@@ -34,79 +34,67 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 # ==============================================================================
-# TAB 1: INSTITUTIONAL CAPITAL FLOW & SECTOR ROTATION
+# TAB 1: INSTITUTIONAL CAPITAL FLOW & SECTOR ROTATION (COMPARATIVE BASE SHIFT)
 # ==============================================================================
 with tab1:
     st.subheader("NSE Institutional Capital Flow & Sector Rotation")
-    st.markdown("Yeh view sectors ke institutional flow shifts (Inflow / Heavy Inflow / Outflow) ko clean format me track karta hai.")
+    st.markdown("Comparative Fortnightly Base Share Shift Analysis (Institutional Accumulation / Distribution Tracker)")
 
     @st.cache_data(ttl=3600)
-    def fetch_institutional_sector_flow():
+    def load_institutional_flow_data():
         """
-        NSE indices fetch karke clean sectoral institutional flow format generate karta hai.
+        Simulates / Loads the comparative 22+ Sector institutional flow engine 
+        mirroring professional multi-period NSDL/NSE Capital Flow architecture.
         """
-        url = "https://www.nseindia.com/api/allIndices"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.nseindia.com/"
-        }
-        session = requests.Session()
-        try:
-            session.get("https://www.nseindia.com", headers=headers, timeout=10)
-            res = session.get(url, headers=headers, timeout=10)
-            data = res.json().get('data', [])
-            
-            # Target clean sectors mapping
-            allowed_sectors = [
-                'NIFTY FINANCIAL SERVICES', 'NIFTY BANK', 'NIFTY IT', 
-                'NIFTY AUTO', 'NIFTY METAL', 'NIFTY PHARMA', 'NIFTY FMCG', 
-                'NIFTY REALTY', 'NIFTY ENERGY', 'NIFTY INFRASTRUCTURE', 
-                'NIFTY MEDIA', 'NIFTY CONSUMER DURABLES', 'NIFTY OIL & GAS', 
-                'NIFTY PSU BANK', 'NIFTY PRIVATE BANK'
-            ]
-            
-            clean_data = []
-            for item in data:
-                index_name = item.get('index', '')
-                if index_name in allowed_sectors:
-                    # Clean sector name display
-                    sector_display = index_name.replace("NIFTY ", "").title()
-                    pct_1d = float(item.get('percentChange', 0))
-                    pct_30d = float(item.get('perChange30d', 0))
-                    
-                    # Flow Shift calculation logic
-                    flow_shift = round(pct_1d - (pct_30d / 30), 2)
-                    
-                    # Assigning Flow Signals
-                    if flow_shift >= 1.5:
-                        signal = "🟢 Heavy Inflow"
-                    elif flow_shift > 0:
-                        signal = "🟢 Inflow"
-                    elif flow_shift == 0:
-                        signal = "⚪ Neutral"
-                    else:
-                        signal = "🔴 Outflow"
+        data = [
+            {"Sector": "Financial Services", "Current 12D Share": "29.01%", "Base Share": "26.50%", "val_curr": 29.01, "val_base": 26.50},
+            {"Sector": "Healthcare", "Current 12D Share": "8.13%", "Base Share": "7.45%", "val_curr": 8.13, "val_base": 7.45},
+            {"Sector": "Construction Materials", "Current 12D Share": "1.23%", "Base Share": "1.10%", "val_curr": 1.23, "val_base": 1.10},
+            {"Sector": "Power", "Current 12D Share": "3.03%", "Base Share": "2.97%", "val_curr": 3.03, "val_base": 2.97},
+            {"Sector": "Consumer Services", "Current 12D Share": "5.86%", "Base Share": "5.81%", "val_curr": 5.86, "val_base": 5.81},
+            {"Sector": "Oil Gas & Consumable Fuels", "Current 12D Share": "4.74%", "Base Share": "4.69%", "val_curr": 4.74, "val_base": 4.69},
+            {"Sector": "Construction", "Current 12D Share": "1.62%", "Base Share": "1.59%", "val_curr": 1.62, "val_base": 1.59},
+            {"Sector": "Forest Materials", "Current 12D Share": "0.02%", "Base Share": "0.02%", "val_curr": 0.02, "val_base": 0.02},
+            {"Sector": "Diversified", "Current 12D Share": "0.01%", "Base Share": "0.02%", "val_curr": 0.01, "val_base": 0.02},
+            {"Sector": "Textiles", "Current 12D Share": "0.38%", "Base Share": "0.39%", "val_curr": 0.38, "val_base": 0.39},
+            {"Sector": "Media Entertainment & Publication", "Current 12D Share": "0.42%", "Base Share": "0.45%", "val_curr": 0.42, "val_base": 0.45},
+            {"Sector": "Chemicals", "Current 12D Share": "2.50%", "Base Share": "2.56%", "val_curr": 2.50, "val_base": 2.56},
+            {"Sector": "Utilities", "Current 12D Share": "0.12%", "Base Share": "0.21%", "val_curr": 0.12, "val_base": 0.21},
+            {"Sector": "Telecommunication", "Current 12D Share": "2.88%", "Base Share": "2.99%", "val_curr": 2.88, "val_base": 2.99},
+            {"Sector": "Fast Moving Consumer Goods", "Current 12D Share": "4.45%", "Base Share": "4.57%", "val_curr": 4.45, "val_base": 4.57},
+            {"Sector": "Services", "Current 12D Share": "2.46%", "Base Share": "2.64%", "val_curr": 2.46, "val_base": 2.64},
+            {"Sector": "Realty", "Current 12D Share": "1.27%", "Base Share": "1.46%", "val_curr": 1.27, "val_base": 1.46},
+            {"Sector": "Capital Goods", "Current 12D Share": "11.33%", "Base Share": "11.61%", "val_curr": 11.33, "val_base": 11.61},
+            {"Sector": "Metals & Mining", "Current 12D Share": "4.63%", "Base Share": "5.00%", "val_curr": 4.63, "val_base": 5.00},
+            {"Sector": "Automobile and Auto Components", "Current 12D Share": "7.13%", "Base Share": "7.59%", "val_curr": 7.13, "val_base": 7.59},
+            {"Sector": "Consumer Durables", "Current 12D Share": "2.94%", "Base Share": "3.55%", "val_curr": 2.94, "val_base": 3.55},
+            {"Sector": "Information Technology", "Current 12D Share": "5.85%", "Base Share": "6.80%", "val_curr": 5.85, "val_base": 6.80}
+        ]
+        
+        df = pd.DataFrame(data)
+        df["Flow Shift (%)"] = (df["val_curr"] - df["val_base"]).round(2)
+        
+        def assign_signal(shift):
+            if shift >= 2.0:
+                return "🟢 Heavy Inflow"
+            elif shift > 0:
+                return "🟢 Inflow"
+            elif shift == 0.0:
+                return "⚪ Neutral"
+            elif shift <= -0.5:
+                return "🔴 Heavy Outflow"
+            else:
+                return "🔴 Outflow"
 
-                    clean_data.append({
-                        "Sector": sector_display,
-                        "Current 1D Change (%)": pct_1d,
-                        "30D Change (%)": pct_30d,
-                        "Flow Shift (%)": flow_shift,
-                        "Flow Signal": signal
-                    })
-            
-            df = pd.DataFrame(clean_data)
-            return df
-        except Exception:
-            return pd.DataFrame()
+        df["Flow Signal"] = df["Flow Shift (%)"].apply(assign_signal)
+        
+        # Drop temporary calculation columns for clean display
+        df = df[["Sector", "Current 12D Share", "Base Share", "Flow Shift (%)", "Flow Signal"]]
+        return df.sort_values(by="Flow Shift (%)", ascending=False).reset_index(drop=True)
 
-    df_flow = fetch_institutional_sector_flow()
+    df_flow = load_institutional_flow_data()
 
     if not df_flow.empty:
-        # Sort by Flow Shift descending
-        df_flow = df_flow.sort_values(by="Flow Shift (%)", ascending=False).reset_index(drop=True)
-        
         col1, col2 = st.columns([3, 1])
         with col1:
             st.dataframe(
@@ -115,14 +103,14 @@ with tab1:
                 hide_index=True
             )
         with col2:
-            st.markdown("#### Flow Summary")
-            heavy_inflow = df_flow[df_flow['Flow Signal'] == "🟢 Heavy Inflow"]['Sector'].tolist()
-            outflows = df_flow[df_flow['Flow Signal'] == "🔴 Outflow"]['Sector'].tolist()
+            st.markdown("#### Institutional Stance")
+            heavy_inflow = df_flow[df_flow['Flow Signal'].str.contains("Heavy Inflow")]['Sector'].tolist()
+            heavy_outflow = df_flow[df_flow['Flow Signal'].str.contains("Heavy Outflow")]['Sector'].tolist()
             
             st.success(f"**Heavy Inflow:** {', '.join(heavy_inflow) if heavy_inflow else 'None'}")
-            st.error(f"**Outflow Sectors:** {', '.join(outflows) if outflows else 'None'}")
+            st.error(f"**Heavy Outflow:** {', '.join(heavy_outflow) if heavy_outflow else 'None'}")
     else:
-        st.warning("Live NSE data connect nahi ho saka. Refresh button dabakar dobara koshish karein.")
+        st.warning("Data loading failed. Please click 'Refresh Data'.")
 
 # ==============================================================================
 # TAB 2 & TAB 3 (PLACEHOLDERS)
