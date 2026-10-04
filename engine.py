@@ -1,11 +1,17 @@
 """
-engine.py - Smart Money Terminal data engine (v10 - FIXED)
-Fixes over v9:
-  - Range cap on wide-range stocks (prevents absurd T1 targets)
-  - Wide_Range flag added
+engine.py - Smart Money Terminal data engine (v11)
+Fixes over v10:
+  - Split/bonus adjustment direction was INVERTED (prices x2 instead of /2) -> fixed
+  - Split detection no longer depends on delivery-qty (more robust)
+  - Re-entry logic: only accumulation signals are logged, same-day not counted,
+    consecutive days = one episode (not a "repeat"), SL-hit tracked properly
+  - Market breadth: liquid universe only, consistent denominators, split-adjusted
+  - Fund/ETF filter no longer drops real stocks (GOLDIAM, SILVERTUC ...)
+  - Fetch window trimmed, error counter no longer counts holidays/today
+  - Sector rotation ignores "Unknown" bucket
 """
 import os
-import sqlite3
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from io import StringIO
@@ -104,10 +110,25 @@ def _fetch_bhav_day(dt):
         return None
 
 
+_FUND_RE = (r"(NIFTY|BEES$|ETF$|IETF$|^LIQUID|^GSEC|^SDL|^E-GOLD|"
+            r"^(GOLD|SILVER)(BEES|ETF|IETF|CASE|ADD|SHARE|\d|$))")
+
+
+def _prune_cache(keep_days=220):
+    try:
+        cutoff = now_ist().date() - timedelta(days=keep_days)
+        for fn in os.listdir(CACHE_DIR):
+            m = re.match(r"sec_bhav_(\d{8})\.csv$", fn)
+            if m and datetime.strptime(m.group(1), "%Y%m%d").date() < cutoff:
+                os.remove(os.path.join(CACHE_DIR, fn))
+    except Exception:
+        pass
+
+
 def fetch_history(days=65):
     today = now_ist().date()
     dates_to_fetch = []
-    for i in range(days * 2 + 15):
+    for i in range(int(days * 1.6) + 10):          # calendar days (~81 weekdays for 65 sessions)
         d = today - timedelta(days=i)
         if d.weekday() >= 5:
             continue
@@ -133,11 +154,14 @@ def fetch_history(days=65):
     results.sort(key=lambda x: x[0], reverse=True)
     frames = []
     dropped = 0
+    missing = 0          # holidays / not-yet-published days (informational only)
+    seen_ok = False
     for d, df in results:
         if len(frames) >= days:
             break
         if df is None or df.empty:
-            errs += 1
+            if seen_ok:
+                missing += 1       # today's file not out yet is NOT counted
             continue
         df.columns = [str(c).strip() for c in df.columns]
         date_col = None
@@ -154,7 +178,7 @@ def fetch_history(days=65):
                     if c in df.columns]
         df = df[df["SERIES"].astype(str).str.strip().isin(["EQ", "BE"])].copy()
         df["Symbol"] = df["SYMBOL"].astype(str).str.strip()
-        df["Date"] = pd.to_datetime(df[date_col], errors="coerce")
+        df["Date"] = pd.to_datetime(df[date_col].astype(str).str.strip(), errors="coerce")
         for c in ["PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE",
                   "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"] + opt_cols:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -164,18 +188,19 @@ def fetch_history(days=65):
         if df.empty:
             errs += 1
             continue
+        seen_ok = True
         base_cols = ["Date", "Symbol", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE",
                      "LOW_PRICE", "CLOSE_PRICE", "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"]
         frames.append(df[base_cols + opt_cols])
 
     if not frames:
-        return pd.DataFrame(), {"days": 0, "errors": errs, "delivery_cov": 0.0, "dropped": dropped}
+        return pd.DataFrame(), {"days": 0, "errors": errs, "missing": missing,
+                                "delivery_cov": 0.0, "dropped": dropped}
 
     hist = pd.concat(frames, ignore_index=True)
     hist = (hist.drop_duplicates(subset=["Date", "Symbol"])
                 .sort_values(["Date", "Symbol"]).reset_index(drop=True))
-    hist = hist[~hist.Symbol.str.contains(
-        r"(NIFTY|BEES|ETF|GOLD|SILVER|LIQUID|GSEC|SDL|E-GOLD)", case=False, na=False)]
+    hist = hist[~hist.Symbol.str.contains(_FUND_RE, case=False, regex=True, na=False)]
     mask = hist.DELIV_PER.isna() & hist.TTL_TRD_QNTY.gt(0)
     hist.loc[mask, "DELIV_PER"] = (hist.loc[mask, "DELIV_QTY"]
                                     / hist.loc[mask, "TTL_TRD_QNTY"] * 100).round(2)
@@ -183,8 +208,9 @@ def fetch_history(days=65):
         if c not in hist.columns:
             hist[c] = np.nan
     delivery_cov = float(hist.DELIV_PER.notna().mean() * 100) if len(hist) else 0.0
-    info = {"days": int(hist.Date.nunique()), "errors": int(errs),
+    info = {"days": int(hist.Date.nunique()), "errors": int(errs), "missing": int(missing),
             "delivery_cov": round(delivery_cov, 1), "dropped": int(dropped)}
+    _prune_cache()
     return hist, info
 
 
@@ -214,44 +240,45 @@ def fetch_sector_map():
     return dict(SECTOR_OF)
 
 
+def _split_ratio(g):
+    """NSE's PREV_CLOSE on ex-date is already adjusted. If it differs a lot from the
+    actual previous close, a split/bonus happened. ratio = adjusted_prev / actual_prev."""
+    prev_close = g["PREV_CLOSE"].astype(float).values
+    close = g["CLOSE_PRICE"].astype(float).values
+    r = np.ones(len(g))
+    for i in range(1, len(g)):
+        if close[i - 1] > 0 and prev_close[i] > 0:
+            x = prev_close[i] / close[i - 1]
+            if (1.5 <= x <= 5.0) or (0.2 <= x <= 0.67):
+                r[i] = x
+    return r
+
+
 def _detect_split_events(g):
     if g is None or len(g) < 2:
         return []
-    g = g.sort_values("Date").reset_index(drop=True).copy()
-    events = []
-    prev_close = g["PREV_CLOSE"].astype(float).values
-    close = g["CLOSE_PRICE"].astype(float).values
-    dq = g["DELIV_QTY"].fillna(0).astype(float).values
-    for i in range(1, len(g)):
-        if close[i-1] <= 0 or prev_close[i] <= 0:
-            continue
-        r = prev_close[i] / close[i-1]
-        if not ((1.5 <= r <= 5.0) or (0.2 <= r <= 0.67)):
-            continue
-        if dq[i] > 0 and dq[i-1] > 0:
-            ratio_dq = max(dq[i] / dq[i-1], dq[i-1] / dq[i])
-            if ratio_dq >= 1.5:
-                events.append(i)
-    return events
+    g = g.sort_values("Date").reset_index(drop=True)
+    r = _split_ratio(g)
+    return [i for i in range(1, len(g)) if r[i] != 1.0]
 
 
 def _adjust_splits(g):
+    """Back-adjust prices (x ratio) and quantities (/ ratio) before each split date.
+    Split 1:2 -> ratio 0.5 -> old prices halved, old quantities doubled."""
     if g is None or len(g) < 2:
         return g, False
     g = g.sort_values("Date").reset_index(drop=True).copy()
-    events = _detect_split_events(g)
-    if not events:
+    r = _split_ratio(g)
+    if not (r != 1.0).any():
         return g, False
-    ratio = g["PREV_CLOSE"].astype(float) / g["CLOSE_PRICE"].astype(float).shift(1)
     cum = np.ones(len(g))
     for i in range(1, len(g)):
-        r = ratio.iloc[i]
-        if pd.notna(r) and ((1.5 <= r <= 5.0) or (0.2 <= r <= 0.67)):
-            cum[:i] = cum[:i] / r
+        if r[i] != 1.0:
+            cum[:i] = cum[:i] * r[i]
     for col in ["OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE", "PREV_CLOSE"]:
-        g[col] = g[col] * cum
+        g[col] = g[col].astype(float) * cum
     for col in ["DELIV_QTY", "TTL_TRD_QNTY"]:
-        g[col] = g[col] / cum
+        g[col] = g[col].astype(float) / cum
     return g, True
 
 
@@ -536,12 +563,14 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
     return scr.reset_index(drop=True)
 
 
-def symbol_view(hist, symbol):
+def symbol_view(hist, symbol, adjust=True):
     if hist is None or hist.empty:
         return pd.DataFrame()
     g = hist[hist.Symbol == symbol].sort_values("Date").reset_index(drop=True).copy()
     if g.empty:
         return g
+    if adjust:
+        g, _ = _adjust_splits(g)
     if "DELIV_PER" not in g.columns or g.DELIV_PER.isna().all():
         g["DELIV_PER"] = (g.DELIV_QTY / g.TTL_TRD_QNTY * 100).round(2)
     return g
@@ -574,6 +603,9 @@ def sector_rotation(pool):
     d = pool.copy()
     d["Sector"] = d["Sector"].fillna("Unknown").astype(str).str.strip()
     d.loc[d.Sector.isin(["", "nan", "None", "NaN"]), "Sector"] = "Unknown"
+    _known = d[d.Sector != "Unknown"]
+    if not _known.empty:          # "Unknown" is not a real sector - keep it out of rotation
+        d = _known
     for c in ["Net_Flow_1M", "Net_Flow_3M", "Deliv_Qty_X", "Ret_1W", "Ret_1M", "Ret_3M"]:
         if c in d.columns:
             d[c] = pd.to_numeric(d[c], errors="coerce")
@@ -613,9 +645,22 @@ def sector_rotation(pool):
     return g[cols].sort_values(["Flow_Chg", "Flow_1M"], ascending=False).reset_index(drop=True)
 
 
+def _trend_label(p, d50, d200, short=False):
+    a50 = bool(d50) and p > d50
+    a200 = bool(d200) and p > d200
+    if a200 and a50:
+        return "🟢 Bullish (above 50 & 200 DMA)"
+    if a200:
+        return "🟡 Cautious (above 200, below 50)" if not short else "🟡 Cautious"
+    if a50:
+        return "🟡 Recovering (above 50, below 200)" if not short else "🟡 Recovering"
+    return "🔴 Bearish (below 50 & 200 DMA)" if not short else "🔴 Bearish"
+
+
 def market_breadth(hist, scr, nifty=None):
     out = {
-        "total": 0, "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
+        "total": 0, "total_20": 0, "total_50": 0, "total_200": 0,
+        "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
         "advances": 0, "declines": 0,
         "breadth_pct_20": 0.0, "breadth_pct_50": 0.0,
         "breadth_pct_200": None,
@@ -632,73 +677,70 @@ def market_breadth(hist, scr, nifty=None):
     if h.empty:
         return out
     last_day = h.Date.max()
-    out["total"] = int(len(h[h.Date == last_day]))
+
+    univ = None     # breadth only on the liquid screener universe (not every illiquid BE stock)
+    if scr is not None and not scr.empty and "Symbol" in scr.columns:
+        univ = set(scr.Symbol)
     if scr is not None and not scr.empty and "Chg_Pct" in scr.columns:
         out["advances"] = int((scr.Chg_Pct > 0).sum())
         out["declines"] = int((scr.Chg_Pct < 0).sum())
         tot = max(1, out["advances"] + out["declines"])
         out["ad_ratio"] = round(out["advances"] / tot * 100, 1)
 
-    counts = {"above_20dma": 0, "above_50dma": 0, "above_200dma": 0}
-    denom = {"d20": 0, "d50": 0, "d200": 0}
+    counts = {20: 0, 50: 0, 200: 0}
+    denom = {20: 0, 50: 0, 200: 0}
     for sym, g in h.groupby("Symbol", sort=False):
+        if univ is not None and sym not in univ:
+            continue
         g = g.sort_values("Date")
+        if g.Date.iloc[-1] != last_day:        # not traded on last session -> stale
+            continue
+        g, _ = _adjust_splits(g)
         c = g["CLOSE_PRICE"].astype(float).values
-        if len(c) >= 20:
-            denom["d20"] += 1
-            if c[-1] > c[-20:].mean(): counts["above_20dma"] += 1
-        if len(c) >= 50:
-            denom["d50"] += 1
-            if c[-1] > c[-50:].mean(): counts["above_50dma"] += 1
-        if len(c) >= 200:
-            denom["d200"] += 1
-            if c[-1] > c[-200:].mean(): counts["above_200dma"] += 1
+        for w in (20, 50, 200):
+            if len(c) >= w:
+                denom[w] += 1
+                if c[-1] > c[-w:].mean():
+                    counts[w] += 1
 
-    out["above_20dma"]  = counts["above_20dma"]
-    out["above_50dma"]  = counts["above_50dma"]
-    out["above_200dma"] = counts["above_200dma"]
-    out["breadth_pct_20"]  = round(100 * counts["above_20dma"]  / max(1, denom["d20"]), 1)
-    out["breadth_pct_50"]  = round(100 * counts["above_50dma"]  / max(1, denom["d50"]), 1)
-    if denom["d200"] > 0:
-        out["breadth_pct_200"] = round(100 * counts["above_200dma"] / denom["d200"], 1)
+    out["above_20dma"], out["above_50dma"], out["above_200dma"] = counts[20], counts[50], counts[200]
+    out["total_20"], out["total_50"], out["total_200"] = denom[20], denom[50], denom[200]
+    out["total"] = denom[20]
+    out["breadth_pct_20"] = round(100 * counts[20] / max(1, denom[20]), 1)
+    out["breadth_pct_50"] = round(100 * counts[50] / max(1, denom[50]), 1)
+    if denom[200] > 0:
+        out["breadth_pct_200"] = round(100 * counts[200] / denom[200], 1)
 
-    if nifty is not None and not nifty.empty and "Close" in nifty.columns:
-        try:
-            nc = nifty["Close"].astype(float).values
+    # Real Nifty (Yahoo), trimmed to the same as-of date as the bhavcopy data
+    try:
+        if nifty is not None and not nifty.empty and "Close" in nifty.columns:
+            nf = nifty[pd.to_datetime(nifty["Date"]) <= last_day] if "Date" in nifty.columns else nifty
+            nc = nf["Close"].astype(float).values
             if len(nc) >= 20:
                 out["nifty_price"] = round(float(nc[-1]), 2)
                 out["nifty_20dma"] = round(float(nc[-20:].mean()), 2)
-                if len(nc) >= 50:
-                    out["nifty_50dma"] = round(float(nc[-50:].mean()), 2)
-                if len(nc) >= 200:
-                    out["nifty_200dma"] = round(float(nc[-200:].mean()), 2)
-                p = nc[-1]
-                a50 = out["nifty_50dma"] and p > out["nifty_50dma"]
-                a200 = out["nifty_200dma"] and p > out["nifty_200dma"]
-                if a200 and a50: out["nifty_trend"] = "🟢 Bullish (above 50 & 200 DMA)"
-                elif a200: out["nifty_trend"] = "🟡 Cautious (above 200, below 50)"
-                elif a50: out["nifty_trend"] = "🟡 Recovering (above 50, below 200)"
-                else: out["nifty_trend"] = "🔴 Bearish (below 50 & 200 DMA)"
+                d50 = float(nc[-50:].mean()) if len(nc) >= 50 else None
+                d200 = float(nc[-200:].mean()) if len(nc) >= 200 else None
+                out["nifty_50dma"] = round(d50, 2) if d50 else 0.0
+                out["nifty_200dma"] = round(d200, 2) if d200 else 0.0
+                out["nifty_trend"] = _trend_label(nc[-1], d50, d200)
                 out["nifty_source"] = "Yahoo"
-            return out
-        except Exception:
-            pass
+                return out
+    except Exception:
+        pass
 
-    try:
+    try:     # fallback: median stock price (weak proxy, clearly labelled)
         grp = h.groupby("Date")["CLOSE_PRICE"].median().reset_index().sort_values("Date")
         nc = grp["CLOSE_PRICE"].values
         if len(nc):
             out["nifty_price"] = round(float(nc[-1]), 2)
-            if len(nc) >= 20: out["nifty_20dma"] = round(float(nc[-20:].mean()), 2)
-            if len(nc) >= 50: out["nifty_50dma"] = round(float(nc[-50:].mean()), 2)
-            if len(nc) >= 200: out["nifty_200dma"] = round(float(nc[-200:].mean()), 2)
-            p = nc[-1]
-            a50 = out["nifty_50dma"] and p > out["nifty_50dma"]
-            a200 = out["nifty_200dma"] and p > out["nifty_200dma"]
-            if a200 and a50: out["nifty_trend"] = "🟢 Bullish (above 50 & 200 DMA)"
-            elif a200: out["nifty_trend"] = "🟡 Cautious"
-            elif a50: out["nifty_trend"] = "🟡 Recovering"
-            else: out["nifty_trend"] = "🔴 Bearish"
+            d50 = float(nc[-50:].mean()) if len(nc) >= 50 else None
+            d200 = float(nc[-200:].mean()) if len(nc) >= 200 else None
+            if len(nc) >= 20:
+                out["nifty_20dma"] = round(float(nc[-20:].mean()), 2)
+            out["nifty_50dma"] = round(d50, 2) if d50 else 0.0
+            out["nifty_200dma"] = round(d200, 2) if d200 else 0.0
+            out["nifty_trend"] = _trend_label(nc[-1], d50, d200, short=True)
             out["nifty_source"] = "median (fallback)"
     except Exception:
         pass
@@ -719,13 +761,14 @@ def load_signal_log():
 
 
 def log_signals(scr, asof):
+    """Log ONLY accumulation signals. (Logging every stock made every stock look like a repeat.)"""
     if scr is None or scr.empty:
         return 0
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         rd = str(pd.Timestamp(asof).date())
         rows = []
-        for _, r in scr.iterrows():
+        for _, r in scr[scr["Signal"].isin(ACC_SIGNALS)].iterrows():
             rows.append({
                 "run_date": rd,
                 "symbol": str(r.get("Symbol", "")),
@@ -738,7 +781,8 @@ def log_signals(scr, asof):
                 "t2": float(r.get("T2", 0) or 0),
                 "t3": float(r.get("T3", 0) or 0),
             })
-        new_df = pd.DataFrame(rows)
+        new_df = pd.DataFrame(rows, columns=["run_date", "symbol", "signal", "score", "price",
+                                             "entry", "sl", "t1", "t2", "t3"])
         if os.path.exists(SIGNALS_CSV):
             old = pd.read_csv(SIGNALS_CSV)
             old = old[old["run_date"].astype(str) != rd]
@@ -796,68 +840,87 @@ def signal_outcomes(hist):
     return pd.DataFrame(out_rows)
 
 
-def reentry_stats(scr, asof, outcomes=None, window_days=120):
+def _episodes(dates, gap_days):
+    """Group dates into episodes: dates <= gap_days apart belong to the same episode."""
+    eps = []
+    for x in sorted(set(pd.Timestamp(d) for d in dates)):
+        if eps and (x - eps[-1][-1]).days <= gap_days:
+            eps[-1].append(x)
+        else:
+            eps.append([x])
+    return eps
+
+
+def reentry_stats(scr, asof, outcomes=None, window_days=120, gap_days=7):
+    """Re-entry = stock showed an accumulation signal, went quiet for > gap_days, and is back.
+    Consecutive days of the same signal are ONE episode, not a repeat.
+    Today's own row (if already logged) is ignored, so call order doesn't matter."""
     if scr is None or scr.empty:
         return scr
+    attrs = dict(getattr(scr, "attrs", {}))
+    out = scr.copy()
+    out["Reentry"] = "🆕 First time"
+    out["Appearances_120D"] = 1
+    out["Days_Since_First"] = 0
     log = load_signal_log()
-    if log.empty:
-        scr["Reentry"] = "🆕 First time"
-        scr["Appearances_120D"] = 1
-        scr["Days_Since_First"] = 0
-        return scr
-
+    if log.empty or "run_date" not in log.columns:
+        out.attrs = attrs
+        return out
     log["run_date"] = pd.to_datetime(log["run_date"], errors="coerce")
-    cutoff = pd.Timestamp(asof) - pd.Timedelta(days=window_days)
-    recent = log[log.run_date >= cutoff]
-
+    asof_ts = pd.Timestamp(asof).normalize()
+    recent = log[(log.run_date >= asof_ts - pd.Timedelta(days=window_days))
+                 & (log.run_date < asof_ts)].dropna(subset=["run_date"])
     if recent.empty:
-        scr["Reentry"] = "🆕 First time"
-        scr["Appearances_120D"] = 1
-        scr["Days_Since_First"] = 0
-        return scr
+        out.attrs = attrs
+        return out
 
-    agg = (recent.groupby("symbol")
-                 .agg(appearances=("run_date", "count"),
-                      first_seen=("run_date", "min"))
-                 .reset_index()
-                 .rename(columns={"symbol": "Symbol"}))
+    sl_hits = {}
+    if outcomes is not None and not outcomes.empty and "hit_sl" in outcomes.columns:
+        oc = outcomes[outcomes.hit_sl == 1]
+        for sym, g in oc.groupby("symbol"):
+            sl_hits[sym] = set(pd.to_datetime(g.run_date))
 
-    if outcomes is not None and not outcomes.empty:
-        sl_agg = outcomes.groupby("symbol")["hit_sl"].max().rename("SL_Hit_Ever")
-        agg = agg.merge(sl_agg, left_on="Symbol", right_index=True, how="left")
-    else:
-        agg["SL_Hit_Ever"] = 0
+    info = {}
+    for sym, g in recent.groupby("symbol"):
+        eps = _episodes(g.run_date, gap_days)
+        continuing = (asof_ts - eps[-1][-1]).days <= gap_days
+        prior = eps[:-1] if continuing else eps
+        first_seen = eps[0][0]
+        flag, n_app = "🆕 First time", 1
+        if prior:
+            prior_dates = {d for ep in prior for d in ep}
+            if prior_dates & sl_hits.get(sym, set()):
+                flag = "🔁 SL hit earlier"
+            elif len(prior) >= 2:
+                flag = "🔁 Repeat"
+            else:
+                flag = "🔁 Second chance"
+            n_app = len(prior) + 1
+        info[sym] = (flag, n_app, int((asof_ts - first_seen).days))
 
-    m = scr.merge(agg, on="Symbol", how="left")
-    m["appearances"] = m["appearances"].fillna(0).astype(int)
-    m["SL_Hit_Ever"] = m["SL_Hit_Ever"].fillna(0).astype(int)
-    m["Appearances_120D"] = m["appearances"] + 1
-
-    def _flag(r):
-        if r.appearances == 0: return "🆕 First time"
-        if r.SL_Hit_Ever == 1: return "🔁 SL hit earlier"
-        if r.appearances >= 3: return "🔁 Repeat"
-        return "🔁 Second chance"
-
-    m["Reentry"] = m.apply(_flag, axis=1)
-    try:
-        m["Days_Since_First"] = (pd.Timestamp(asof) - pd.to_datetime(m["first_seen"])).dt.days.fillna(0).astype(int)
-    except Exception:
-        m["Days_Since_First"] = 0
-    m = m.drop(columns=["appearances", "SL_Hit_Ever", "first_seen"], errors="ignore")
-    return m
+    out["Reentry"] = out.Symbol.map(lambda s_: info[s_][0] if s_ in info else "🆕 First time")
+    out["Appearances_120D"] = out.Symbol.map(lambda s_: info[s_][1] if s_ in info else 1).astype(int)
+    out["Days_Since_First"] = out.Symbol.map(lambda s_: info[s_][2] if s_ in info else 0).astype(int)
+    out.attrs = attrs
+    return out
 
 
-def reentry_history(symbol, limit=20):
+def reentry_history(symbol, limit=20, outcomes=None):
     log = load_signal_log()
     if log.empty:
         return pd.DataFrame()
     d = log[log.symbol == symbol].sort_values("run_date", ascending=False).head(limit).copy()
     if d.empty:
         return pd.DataFrame()
-    d["SL_Hit"] = 0
+    d["run_date"] = pd.to_datetime(d["run_date"], errors="coerce")
+    hit = set()
+    if outcomes is not None and not outcomes.empty and "hit_sl" in outcomes.columns:
+        m = outcomes[(outcomes.symbol == symbol) & (outcomes.hit_sl == 1)]
+        hit = set(pd.to_datetime(m.run_date))
+    d["SL_Hit"] = d["run_date"].isin(hit)
     try:
-        d = d.rename(columns={"run_date": "Date", "signal": "Signal", "score": "Score",
+        d["Date"] = d["run_date"].dt.strftime("%d %b %Y")
+        d = d.rename(columns={"signal": "Signal", "score": "Score",
                               "price": "Price", "entry": "Entry", "sl": "SL"})
         return d[["Date", "Signal", "Score", "Price", "Entry", "SL", "SL_Hit"]]
     except Exception:
