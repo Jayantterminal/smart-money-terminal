@@ -1,9 +1,10 @@
 """
-engine.py - Smart Money Terminal data engine (v3)
-- Parallel downloads (8x faster)
-- Fixed fresh spike, entry zone, SL cap, split detection
-- Calendar-week buy weeks, exclusion of breakout days from range
-- Market breadth + Nifty trend functions
+engine.py - Smart Money Terminal data engine (v5)
+- Parallel downloads
+- Fixed filters (fresh spike, entry zone, SL cap, split detection)
+- Calendar-week buy weeks
+- DoD delivery metrics (day-over-day change)
+- Market breadth + Nifty trend
 """
 import os
 import sqlite3
@@ -102,7 +103,6 @@ def _fetch_bhav_day(dt):
 
 
 def fetch_history(days=65):
-    """Parallel download - 8x faster than sequential."""
     today = now_ist().date()
     dates_to_fetch = []
     for i in range(days * 2 + 15):
@@ -147,18 +147,21 @@ def fetch_history(days=65):
         if not need.issubset(df.columns) or date_col is None:
             errs += 1
             continue
+        opt_cols = [c for c in ["TURNOVER_LACS", "NO_OF_TRADES", "AVG_PRICE", "LAST_PRICE"]
+                    if c in df.columns]
         df = df[df["SERIES"].astype(str).str.strip().isin(["EQ", "BE"])].copy()
         df["Symbol"] = df["SYMBOL"].astype(str).str.strip()
         df["Date"] = pd.to_datetime(df[date_col], errors="coerce")
         for c in ["PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE",
-                  "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"]:
+                  "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"] + opt_cols:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df = df.dropna(subset=["Date", "CLOSE_PRICE", "Symbol"])
         if df.empty:
             errs += 1
             continue
-        frames.append(df[["Date", "Symbol", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE",
-                          "LOW_PRICE", "CLOSE_PRICE", "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"]])
+        base_cols = ["Date", "Symbol", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE",
+                     "LOW_PRICE", "CLOSE_PRICE", "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"]
+        frames.append(df[base_cols + opt_cols])
 
     if not frames:
         return pd.DataFrame(), {"days": 0, "errors": errs}
@@ -171,6 +174,9 @@ def fetch_history(days=65):
     mask = hist.DELIV_PER.isna() & hist.TTL_TRD_QNTY.gt(0)
     hist.loc[mask, "DELIV_PER"] = (hist.loc[mask, "DELIV_QTY"]
                                     / hist.loc[mask, "TTL_TRD_QNTY"] * 100).round(2)
+    for c in ["TURNOVER_LACS", "NO_OF_TRADES", "AVG_PRICE", "LAST_PRICE"]:
+        if c not in hist.columns:
+            hist[c] = np.nan
     return hist, {"days": int(hist.Date.nunique()), "errors": int(errs)}
 
 
@@ -284,6 +290,20 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         deliv_per_3m = float(dp_3m.mean()) if len(dp_3m) else 0.0
         deliv_per_chg = deliv_per_1m - deliv_per_3m
 
+        # DoD delivery metrics
+        if n >= 2 and dq[-2] > 0:
+            dq_dod_pct = (dq[-1] / dq[-2] - 1) * 100
+        else:
+            dq_dod_pct = 0.0
+        if n >= 2:
+            dp_dod_pp = float(dp[-1] - dp[-2])
+        else:
+            dp_dod_pp = 0.0
+        if n >= 6 and dq[-6:-3].mean() > 0:
+            dq_3d_ratio = float(dq[-3:].mean() / dq[-6:-3].mean())
+        else:
+            dq_3d_ratio = 1.0
+
         up = c_1m > pc_1m; dn = c_1m < pc_1m; tot = dq_1m.sum()
         net_flow_1m = float((dq_1m[up].sum() - dq_1m[dn].sum()) / tot * 100) if tot > 0 else 0.0
         up3 = c_3m > pc_3m; dn3 = c_3m < pc_3m; tot3 = dq_3m.sum()
@@ -394,6 +414,32 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         ret_1m = (c[-1] / c[-21] - 1) * 100 if n >= 21 and c[-21] > 0 else 0.0
         ret_3m = (c[-1] / c[-63] - 1) * 100 if n >= 63 and c[-63] > 0 else 0.0
 
+        # Turnover / Trades / Avg price metrics
+        to_1m = 0.0; to_3m = 0.0; tr_1m = 0.0; to_x = 0.0
+        trades_per_cr = 0.0; close_vs_avg = 0.0
+        try:
+            if "TURNOVER_LACS" in g.columns:
+                to_arr = pd.to_numeric(g["TURNOVER_LACS"], errors="coerce").fillna(0).values / 100.0
+                to_1m = float(to_arr[i1m:].sum()) if len(to_arr[i1m:]) else 0.0
+                to_3m = float(to_arr[i3m:i1m].sum()) if len(to_arr[i3m:i1m]) else 0.0
+                to_1m_avg = to_1m / max(1, len(to_arr[i1m:]))
+                to_3m_avg = to_3m / max(1, len(to_arr[i3m:i1m])) if len(to_arr[i3m:i1m]) else 0.0
+                to_x = to_1m_avg / to_3m_avg if to_3m_avg > 0 else 0.0
+            if "NO_OF_TRADES" in g.columns:
+                tr_arr = pd.to_numeric(g["NO_OF_TRADES"], errors="coerce").fillna(0).values
+                tr_1m = float(tr_arr[i1m:].mean()) if len(tr_arr[i1m:]) else 0.0
+                to_1m_avg_for_ratio = to_1m / max(1, len(to_arr[i1m:])) if to_1m > 0 else 0.0
+                trades_per_cr = tr_1m / to_1m_avg_for_ratio if to_1m_avg_for_ratio > 0 else 0.0
+            if "AVG_PRICE" in g.columns:
+                ap_arr = pd.to_numeric(g["AVG_PRICE"], errors="coerce").values
+                gaps = []
+                for i in range(i1m, n):
+                    if pd.notna(ap_arr[i]) and ap_arr[i] > 0:
+                        gaps.append((c[i] - ap_arr[i]) / ap_arr[i] * 100)
+                close_vs_avg = float(np.mean(gaps)) if gaps else 0.0
+        except Exception:
+            pass
+
         score = 0
         if deliv_qty_x >= 1.5:   score += 20
         elif deliv_qty_x >= 1.2: score += 14
@@ -429,6 +475,9 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
             "Deliv_Qty_1M": int(avg_dq_1m), "Deliv_Qty_3M": int(avg_dq_3m),
             "Deliv_Per_1M": round(deliv_per_1m, 1), "Deliv_Per_3M": round(deliv_per_3m, 1),
             "Deliv_Per_Chg": round(deliv_per_chg, 1),
+            "Deliv_Qty_DoD": round(dq_dod_pct, 1),
+            "Deliv_Per_DoD": round(dp_dod_pp, 2),
+            "Deliv_3D_Ratio": round(dq_3d_ratio, 2),
             "Net_Flow_1M": round(net_flow_1m, 1), "Net_Flow_3M": round(net_flow_3m, 1),
             "Score": int(score), "Signal": signal,
             "Buying_Status": buying_status, "Buy_Weeks": int(buy_weeks),
@@ -446,6 +495,12 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
             "T1": round(t1, 2), "T2": round(t2, 2), "T3": round(t3, 2),
             "Plan_Status": plan_status, "Avg_Turnover_Cr": round(turnover_cr, 2),
             "Ret_1W": round(ret_1w, 2), "Ret_1M": round(ret_1m, 2), "Ret_3M": round(ret_3m, 2),
+            "Turnover_1M_Cr": round(to_1m, 2),
+            "Turnover_3M_Cr": round(to_3m, 2),
+            "Turnover_X": round(to_x, 2),
+            "Trades_1M_Avg": int(tr_1m),
+            "Trades_per_Cr": round(trades_per_cr, 1),
+            "Close_vs_Avg": round(close_vs_avg, 2),
             "Is_New_Listing": bool(is_new_listing),
             "Has_Split_Adjust": bool(had_split),
         })
@@ -487,7 +542,7 @@ def weekly_flows(g, n=12):
     return out[-n:]
 
 
-def sector_rotation(pool: pd.DataFrame) -> pd.DataFrame:
+def sector_rotation(pool):
     if pool is None or pool.empty:
         return pd.DataFrame()
     for c in ["Sector", "Signal", "Net_Flow_1M", "Net_Flow_3M"]:
@@ -535,9 +590,7 @@ def sector_rotation(pool: pd.DataFrame) -> pd.DataFrame:
     return g[cols].sort_values(["Flow_Chg", "Flow_1M"], ascending=False).reset_index(drop=True)
 
 
-# ============ MARKET BREADTH + NIFTY TREND ============ #
 def market_breadth(hist, scr):
-    """Compute market breadth + Nifty trend from hist data."""
     out = {
         "total": 0, "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
         "advances": 0, "declines": 0, "breadth_pct_20": 0.0, "breadth_pct_50": 0.0,
@@ -547,12 +600,9 @@ def market_breadth(hist, scr):
     }
     if hist is None or hist.empty:
         return out
-
     h = hist.copy()
     h["Date"] = pd.to_datetime(h["Date"], errors="coerce")
     h = h.dropna(subset=["Date", "CLOSE_PRICE"])
-
-    # Per-stock DMAs (need 200+ sessions for 200-DMA; if not available, use what we have)
     last_day = h.Date.max()
     latest = h[h.Date == last_day]
     out["total"] = int(len(latest))
@@ -584,7 +634,6 @@ def market_breadth(hist, scr):
     out["breadth_pct_50"]  = round(100 * counts["above_50dma"]  / max(1, denom["d50"]), 1)
     out["breadth_pct_200"] = round(100 * counts["above_200dma"] / max(1, denom["d200"]), 1)
 
-    # Nifty proxy via NIFTYBEES or similar - but we stripped ETFs. Use median of large stocks as proxy.
     try:
         grp = h.groupby("Date")["CLOSE_PRICE"].median().reset_index().sort_values("Date")
         nc = grp["CLOSE_PRICE"].values
@@ -603,11 +652,9 @@ def market_breadth(hist, scr):
             else:                     out["nifty_trend"] = "🔴 Bearish (below 50 & 200 DMA)"
     except Exception:
         pass
-
     return out
 
 
-# ============ RE-ENTRY TRACKER ============ #
 def _init_tracker_db():
     try:
         con = sqlite3.connect(DB_PATH, timeout=10)
