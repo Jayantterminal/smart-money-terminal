@@ -1,13 +1,8 @@
 """
-engine.py - Smart Money Terminal data engine (v9 - FIXED)
-Fixes:
-  - Strict split detection (no false positives)
-  - 200 DMA returns None when insufficient data
-  - CSV-based signal log (persistent across Streamlit reboots)
-  - Missing functions added: DATA_DIR, ACC_SIGNALS, log_signals, signal_outcomes
-  - info dict now includes delivery_cov and dropped
-  - market_breadth accepts real Nifty from market.py
-  - reentry_stats signature fixed
+engine.py - Smart Money Terminal data engine (v10 - FIXED)
+Fixes over v9:
+  - Range cap on wide-range stocks (prevents absurd T1 targets)
+  - Wide_Range flag added
 """
 import os
 import sqlite3
@@ -23,7 +18,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(_BASE_DIR, ".nse_cache")
 DATA_DIR = os.path.join(_BASE_DIR, "data")
-DB_PATH = os.path.join(DATA_DIR, "signals_log.db")  # optional, legacy
+DB_PATH = os.path.join(DATA_DIR, "signals_log.db")
 SIGNALS_CSV = os.path.join(DATA_DIR, "signals_log.csv")
 try:
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -220,12 +215,6 @@ def fetch_sector_map():
 
 
 def _detect_split_events(g):
-    """
-    STRICT split detection (v9 - no false positives).
-    Only triggers when BOTH signals confirm:
-      1. NSE PREV_CLOSE ratio > 1.5x or < 0.67x (NSE's own ex-date adjustment)
-      2. Delivered qty jumps 1.5x+ same day (scale change confirms)
-    """
     if g is None or len(g) < 2:
         return []
     g = g.sort_values("Date").reset_index(drop=True).copy()
@@ -237,10 +226,8 @@ def _detect_split_events(g):
         if close[i-1] <= 0 or prev_close[i] <= 0:
             continue
         r = prev_close[i] / close[i-1]
-        # STRICT: narrow range only (real splits/bonus)
         if not ((1.5 <= r <= 5.0) or (0.2 <= r <= 0.67)):
             continue
-        # Additional: delivery qty must jump 1.5x+
         if dq[i] > 0 and dq[i-1] > 0:
             ratio_dq = max(dq[i] / dq[i-1], dq[i-1] / dq[i])
             if ratio_dq >= 1.5:
@@ -389,16 +376,30 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
             sl = entry * 0.92
         risk_pct = (entry - sl) / entry * 100 if entry > 0 else 0.0
 
-        rng_height = rng_hi - rng_lo
-        t1 = rng_hi if rng_hi > entry else entry * 1.05
-        t2 = t1 + rng_height * 0.5
-        t3 = t1 + rng_height
-        if t2 <= t1: t2 = t1 * 1.05
-        if t3 <= t2: t3 = t2 * 1.05
+        # ============ FIX: Range cap on wide-range stocks ============
+        wide_range = rng_pct > 40
+        if wide_range:
+            # Use fixed % targets - wide ranges give absurd projections
+            t1 = entry * 1.10
+            t2 = entry * 1.20
+            t3 = entry * 1.35
+        else:
+            rng_height = rng_hi - rng_lo
+            t1 = rng_hi if rng_hi > entry else entry * 1.05
+            t2 = t1 + rng_height * 0.5
+            t3 = t1 + rng_height
+            if t2 <= t1: t2 = t1 * 1.05
+            if t3 <= t2: t3 = t2 * 1.05
+            # Sanity cap - targets never exceed reasonable %
+            t1 = min(t1, entry * 1.30)
+            t2 = min(t2, entry * 1.45)
+            t3 = min(t3, entry * 1.60)
 
         plan_status = "Entry zone current range ke andar hai."
         if price > rng_hi:   plan_status = "Price range ke upar breakout hua hai."
         elif price < rng_lo: plan_status = "Price range se neeche - wait karo."
+        if wide_range:
+            plan_status = "Range bahut wide hai - targets % based (10/20/35%) rakhe gaye hain."
 
         dq_ref = avg_dq_3m if avg_dq_3m > 0 else (avg_dq_1m if avg_dq_1m > 0 else 1.0)
         today_dq = float(dq[-1]); today_dp = float(dp[-1])
@@ -508,6 +509,7 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
             "Setup": setup, "Stage": stage,
             "Range_Lo": round(rng_lo, 2), "Range_Hi": round(rng_hi, 2),
             "Range_Pct": round(rng_pct, 1),
+            "Wide_Range": bool(wide_range),
             "Entry": round(entry, 2),
             "Entry_Low": round(entry_low, 2), "Entry_High": round(entry_high, 2),
             "Entry_Zone": entry_zone, "Entry_Status": entry_status,
@@ -612,15 +614,11 @@ def sector_rotation(pool):
 
 
 def market_breadth(hist, scr, nifty=None):
-    """
-    Market breadth. If real Nifty df (from market.py) provided, use it for trend.
-    Otherwise fall back to median stock price (less accurate).
-    """
     out = {
         "total": 0, "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
         "advances": 0, "declines": 0,
         "breadth_pct_20": 0.0, "breadth_pct_50": 0.0,
-        "breadth_pct_200": None,  # None = insufficient data (< 200 sessions)
+        "breadth_pct_200": None,
         "ad_ratio": 0.0,
         "nifty_price": 0.0, "nifty_20dma": 0.0, "nifty_50dma": 0.0, "nifty_200dma": 0.0,
         "nifty_trend": "-",
@@ -664,7 +662,6 @@ def market_breadth(hist, scr, nifty=None):
     if denom["d200"] > 0:
         out["breadth_pct_200"] = round(100 * counts["above_200dma"] / denom["d200"], 1)
 
-    # Real Nifty if provided (from market.py)
     if nifty is not None and not nifty.empty and "Close" in nifty.columns:
         try:
             nc = nifty["Close"].astype(float).values
@@ -687,7 +684,6 @@ def market_breadth(hist, scr, nifty=None):
         except Exception:
             pass
 
-    # Fallback: median (mark as such)
     try:
         grp = h.groupby("Date")["CLOSE_PRICE"].median().reset_index().sort_values("Date")
         nc = grp["CLOSE_PRICE"].values
@@ -709,7 +705,7 @@ def market_breadth(hist, scr, nifty=None):
     return out
 
 
-# ============ SIGNAL LOG (CSV-based, persistent) ============ #
+# ============ SIGNAL LOG ============ #
 def load_signal_log():
     if not os.path.exists(SIGNALS_CSV):
         return pd.DataFrame()
@@ -723,7 +719,6 @@ def load_signal_log():
 
 
 def log_signals(scr, asof):
-    """Append today's picks to data/signals_log.csv (idempotent per date)."""
     if scr is None or scr.empty:
         return 0
     try:
@@ -750,7 +745,6 @@ def log_signals(scr, asof):
             combined = pd.concat([old, new_df], ignore_index=True)
         else:
             combined = new_df
-        # Prune > 180 days
         try:
             combined["_d"] = pd.to_datetime(combined["run_date"], errors="coerce")
             cutoff = pd.Timestamp(asof) - pd.Timedelta(days=180)
@@ -764,18 +758,12 @@ def log_signals(scr, asof):
 
 
 def signal_outcomes(hist):
-    """
-    For each row in signals_log.csv, check (using hist data) whether
-    SL / T1 / T2 / T3 was hit after that run_date.
-    Returns DataFrame[run_date, symbol, hit_sl, hit_t1, hit_t2, hit_t3, days_tracked]
-    """
     log = load_signal_log()
     if log.empty or hist is None or hist.empty:
         return pd.DataFrame()
     h = hist.copy()
     h["Date"] = pd.to_datetime(h["Date"], errors="coerce")
     h = h.dropna(subset=["Date", "Symbol", "LOW_PRICE", "HIGH_PRICE"])
-    # Group by symbol once for speed
     grouped = {sym: g.sort_values("Date") for sym, g in h.groupby("Symbol")}
     out_rows = []
     for _, r in log.iterrows():
@@ -809,10 +797,6 @@ def signal_outcomes(hist):
 
 
 def reentry_stats(scr, asof, outcomes=None, window_days=120):
-    """
-    Enrich screener with re-entry history from signals_log.csv.
-    outcomes (optional) from signal_outcomes() adds SL-hit flag.
-    """
     if scr is None or scr.empty:
         return scr
     log = load_signal_log()
@@ -865,19 +849,16 @@ def reentry_stats(scr, asof, outcomes=None, window_days=120):
 
 
 def reentry_history(symbol, limit=20):
-    """Per-symbol history from CSV log."""
     log = load_signal_log()
     if log.empty:
         return pd.DataFrame()
     d = log[log.symbol == symbol].sort_values("run_date", ascending=False).head(limit).copy()
     if d.empty:
         return pd.DataFrame()
-    d["SL_Hit"] = 0  # populated below
-    # Attach hit info if available
+    d["SL_Hit"] = 0
     try:
         d = d.rename(columns={"run_date": "Date", "signal": "Signal", "score": "Score",
                               "price": "Price", "entry": "Entry", "sl": "SL"})
-        # Keep SL_Hit column empty (computed in app.py via outcomes if needed)
         return d[["Date", "Signal", "Score", "Price", "Entry", "SL", "SL_Hit"]]
     except Exception:
         return d
