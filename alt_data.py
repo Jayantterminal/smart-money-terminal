@@ -1,6 +1,6 @@
 """
-alt_data.py - Alternative data (v3)
-Bulk/Block deals, delivery value, RS vs Nifty, FII/DII, Insider trades, Telegram alerts.
+alt_data.py - Alternative data (v5)
+Bulk/Block, delivery value, RS vs Nifty, FII/DII, Insider, Telegram.
 """
 import numpy as np
 import pandas as pd
@@ -19,7 +19,6 @@ _SESSION = None
 
 
 def _get_session():
-    """Maintain NSE session with cookies for API access."""
     global _SESSION
     if _SESSION is not None:
         return _SESSION
@@ -34,7 +33,6 @@ def _get_session():
     return s
 
 
-# ============ BULK + BLOCK DEALS ============ #
 def fetch_bulk_block_deals():
     frames = []
     for url, typ in [
@@ -82,7 +80,6 @@ def fetch_bulk_block_deals():
     return d[cols]
 
 
-# ============ NIFTY PROXY ============ #
 def _nifty_from_hist(hist):
     if hist is None or hist.empty or "Symbol" not in hist.columns:
         return pd.DataFrame()
@@ -95,13 +92,11 @@ def _nifty_from_hist(hist):
     return pd.DataFrame()
 
 
-# ============ MAIN ENRICHMENT ============ #
 def enrich_screener(scr, hist, deals):
     if scr is None or scr.empty:
         return scr
     out = scr.copy()
 
-    # Delivery value in ₹ Cr
     try:
         if hist is not None and not hist.empty:
             need = {"Symbol", "Date", "DELIV_QTY", "CLOSE_PRICE"}
@@ -123,7 +118,6 @@ def enrich_screener(scr, hist, deals):
     except Exception:
         pass
 
-    # Relative strength vs Nifty
     try:
         nifty = _nifty_from_hist(hist)
         if not nifty.empty and hist is not None and "CLOSE_PRICE" in hist.columns:
@@ -147,7 +141,6 @@ def enrich_screener(scr, hist, deals):
     except Exception:
         pass
 
-    # Bulk/Block summary
     try:
         if deals is not None and not deals.empty and "Symbol" in deals.columns:
             d = deals.copy()
@@ -188,9 +181,7 @@ def deals_table(deals, limit=200):
     return d.sort_values("Value_Cr", ascending=False).head(limit)
 
 
-# ============ FII / DII DAILY FLOW ============ #
 def fetch_fiidii():
-    """NSE daily FII/DII cash market flow. Returns dict or None."""
     try:
         s = _get_session()
         r = s.get("https://www.nseindia.com/api/fiidiiTradeReact", timeout=15)
@@ -217,9 +208,7 @@ def fetch_fiidii():
         return None
 
 
-# ============ INSIDER / PROMOTER TRADES ============ #
 def fetch_insider_trades(days_back=7):
-    """NSE insider trading disclosures. Returns DataFrame."""
     cols = ["Date", "Symbol", "Person", "Category", "Buy_Sell", "Qty", "Value_Cr", "Mode"]
     try:
         s = _get_session()
@@ -254,9 +243,7 @@ def fetch_insider_trades(days_back=7):
         return pd.DataFrame(columns=cols)
 
 
-# ============ TELEGRAM ALERTS ============ #
-def send_telegram_message(token: str, chat_id: str, text: str):
-    """Send message to Telegram bot. Returns (ok, info)."""
+def send_telegram_message(token, chat_id, text):
     if not token or not chat_id:
         return False, "Token ya Chat ID missing."
     try:
@@ -272,7 +259,6 @@ def send_telegram_message(token: str, chat_id: str, text: str):
 
 
 def format_telegram_alert(scr, deals, breadth, asof_date, top_n=10):
-    """Format a compact alert message for Telegram."""
     lines = [f"<b>📈 Smart Money Terminal — {asof_date}</b>", ""]
     if breadth:
         lines.append(f"<b>Market:</b> {breadth.get('nifty_trend','-')}")
