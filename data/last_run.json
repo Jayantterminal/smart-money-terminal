@@ -1,6 +1,6 @@
 {
   "asof": "2026-10-01",
-  "run_at_ist": "2026-10-04 13:43",
+  "run_at_ist": "2026-10-04 13:47",
   "stocks": 1252,
   "accumulation": 363,
   "fresh": 170,
@@ -13,5 +13,5 @@
     "dropped": 0
   },
   "deals_stale": false,
-  "telegram": "already sent for this date"
+  "telegram": "sent"
 }
