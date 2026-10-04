@@ -1,16 +1,6 @@
 """
 daily_job.py - headless daily run (GitHub Actions / cron / manual)
-
-    python daily_job.py              # fetch, log signals to CSV, send Telegram
-    python daily_job.py --force      # send Telegram even if already sent today
-    python daily_job.py --no-telegram
-
-Env vars (GitHub Secrets): TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-
-Writes:
-  data/signals_log.csv    (append/update today's picks - source of truth)
-  data/last_run.json      (status of last run)
-  data/last_alert.txt     (session date for which Telegram was sent)
+Fixes: min turnover filter = 5 Cr (illiquid stocks hataye).
 """
 from __future__ import annotations
 
@@ -26,6 +16,7 @@ import engine as E
 import market as M
 
 DATA = E.DATA_DIR
+MIN_TURNOVER_CR = 5.0  # illiquid stocks filter
 
 
 def main() -> int:
@@ -35,7 +26,6 @@ def main() -> int:
     args = ap.parse_args()
     os.makedirs(DATA, exist_ok=True)
 
-    # 1. Fetch NSE delivery data
     hist, info = E.fetch_history(65)
     if hist.empty:
         print("NSE data nahi mila:", info)
@@ -45,28 +35,25 @@ def main() -> int:
     print(f"As-of {asof_s} | sessions {info['days']} | delivery coverage {info['delivery_cov']}% | "
           f"dropped {info['dropped']}")
 
-    # 2. Fetch real Nifty from Yahoo
     nifty_df = M.fetch_index("^NSEI", "2y")
     nifty_snap = M.snapshot(nifty_df)
     if not nifty_snap:
         print("Warning: Nifty data unavailable, using fallback")
 
-    # 3. Compute screener
-    scr = E.compute_screener(hist, (), 0.0, E.fetch_sector_map())
+    # FIX: min turnover = 5 Cr
+    scr = E.compute_screener(hist, (), MIN_TURNOVER_CR, E.fetch_sector_map())
     if scr.empty:
         print("Screener empty")
         return 1
+    print(f"Screener: {len(scr)} stocks after min turnover ₹{MIN_TURNOVER_CR} Cr filter")
 
-    # 4. Enrich with deals + RS
     deals = A.fetch_bulk_block_deals()
     scr = A.enrich_screener(scr, hist, deals, nifty_df)
 
-    # 5. Log to CSV, compute outcomes, re-entry stats
     n_logged = E.log_signals(scr, asof)
     outcomes = E.signal_outcomes(hist)
     scr = E.reentry_stats(scr, asof, outcomes)
 
-    # 6. Breadth
     breadth = E.market_breadth(hist, scr, nifty_df)
 
     n_acc = int(scr.Signal.isin(E.ACC_SIGNALS).sum())
@@ -80,12 +67,12 @@ def main() -> int:
         "accumulation": n_acc,
         "fresh": n_fresh,
         "logged": n_logged,
+        "min_turnover_cr": MIN_TURNOVER_CR,
         "info": info,
         "deals_stale": stale_deals,
         "telegram": "skipped",
     }
 
-    # 7. Telegram
     token, chat = A.telegram_creds_from_env()
     last_alert_fp = os.path.join(DATA, "last_alert.txt")
     last = open(last_alert_fp).read().strip() if os.path.exists(last_alert_fp) else ""
@@ -102,7 +89,6 @@ def main() -> int:
             with open(last_alert_fp, "w") as f:
                 f.write(asof_s)
 
-    # 8. Save status
     with open(os.path.join(DATA, "last_run.json"), "w") as f:
         json.dump(status, f, indent=2, default=str)
     print(json.dumps(status, indent=2, default=str))
