@@ -1,7 +1,8 @@
 """
-app.py - Smart Money Terminal (v3)
+app.py - Smart Money Terminal (v4)
 All features: screener, sector rotation, stock plan, compare, bulk/block,
-re-entry tracker, market breadth, FII/DII, insider trades, position sizing, Telegram.
+re-entry tracker, market breadth, FII/DII, insider trades, position sizing, Telegram,
+last 5 days delivery verification table.
 """
 import hashlib
 from datetime import datetime
@@ -219,6 +220,22 @@ def render_detail(sym, k):
         f"Appeared {int(r.get('Appearances_120D', 1))}x in last 120D",
         "y" if "SL" in str(rflag) else "")
 
+    # Turnover + Trades row
+    c3 = st.columns(4)
+    to1 = r.get("Turnover_1M_Cr", 0); tox = r.get("Turnover_X", 0)
+    tr1 = r.get("Trades_1M_Avg", 0); tpc = r.get("Trades_per_Cr", 0)
+    cva = r.get("Close_vs_Avg", 0)
+    kpi(c3[0], "Turnover 1M", f"₹{to1:,.1f} Cr",
+        f"{tox:.2f}x vs prev 2M" if tox else "-",
+        "g" if tox > 1.1 else "r" if tox < 0.9 else "")
+    kpi(c3[1], "Trades/day (1M)", f"{int(tr1):,}", "Average daily trades")
+    kpi(c3[2], "Trades per ₹ Cr", f"{tpc:.1f}",
+        "Kam = institutional" if 0 < tpc < 500 else ("Zyada = retail" if tpc >= 500 else "-"),
+        "g" if 0 < tpc < 500 else "y" if tpc < 2000 else "r")
+    kpi(c3[3], "Close vs Avg price", f"{cva:+.2f}%",
+        "Buyers end me active" if cva > 0 else "Sellers end me active",
+        "g" if cva > 0.2 else "r" if cva < -0.2 else "")
+
     st.markdown("#### Trade plan (range based)")
     c = st.columns(5)
     kpi(c[0], "Price vs Entry zone", f"₹{r.Price:,.2f}  |  ₹{r.Entry_Low:,.2f}–{r.Entry_High:,.2f}",
@@ -236,6 +253,11 @@ def render_detail(sym, k):
                f"delivery % {r.Deliv_Per_Chg:+.1f}pp.")
     why.append(f"Net buy flow {r.Net_Flow_1M:+.0f}% (pichle 2M: {r.Net_Flow_3M:+.0f}%); "
                f"{r.Acc_Days} accumulation din vs {r.Dist_Days} distribution din (last 21).")
+    if tox:
+        why.append(f"Turnover 1M: ₹{to1:,.1f} Cr ({tox:.2f}x vs prev 2M) | "
+                   f"Trades/day: {int(tr1):,} | Trades per ₹Cr: {tpc:.1f} "
+                   f"({'institutional' if 0 < tpc < 500 else 'retail' if tpc >= 500 else '-'}) | "
+                   f"Close vs Avg: {cva:+.2f}%.")
     why.append(f"Fresh activity: <b>{FICON[r.Fresh]}</b> | last 5 days: {r.Last5} | "
                f"aaj ki delivered qty 3M avg ka {r.Today_X:.2f}x.")
     if pd.notna(rs):
@@ -269,6 +291,46 @@ def render_detail(sym, k):
     fig.update_layout(height=760, template="plotly_dark", showlegend=False, xaxis_rangeslider_visible=False,
                       margin=dict(l=10, r=70, t=30, b=10))
     st.plotly_chart(fig, width="stretch", key=f"{k}_price")
+
+    # -------- Last 5 days delivery data (verify) --------
+    try:
+        last_n = min(5, len(g))
+        tbl = g.tail(last_n).copy()
+        tbl = tbl.iloc[::-1].reset_index(drop=True)
+        tbl["Date"] = pd.to_datetime(tbl["Date"]).dt.strftime("%a, %d %b %Y")
+        tbl["Prev_Close"] = pd.to_numeric(tbl["PREV_CLOSE"], errors="coerce").round(2)
+        tbl["Close"] = pd.to_numeric(tbl["CLOSE_PRICE"], errors="coerce").round(2)
+        tbl["Chg_%"] = ((tbl["Close"] / tbl["Prev_Close"] - 1) * 100).round(2)
+        tbl["Deliv_Qty"] = pd.to_numeric(tbl["DELIV_QTY"], errors="coerce").fillna(0).astype(int)
+        tbl["Total_Qty"] = pd.to_numeric(tbl["TTL_TRD_QNTY"], errors="coerce").fillna(0).astype(int)
+        tbl["Deliv_%"] = pd.to_numeric(tbl["DELIV_PER"], errors="coerce").round(2)
+
+        try:
+            dp_3m = float(pd.to_numeric(g["DELIV_PER"], errors="coerce").tail(63).head(42).mean())
+        except Exception:
+            dp_3m = 0.0
+        try:
+            dq_3m = float(pd.to_numeric(g["DELIV_QTY"], errors="coerce").tail(63).head(42).mean())
+        except Exception:
+            dq_3m = 0.0
+
+        st.markdown("#### 📋 Last 5 days delivery data (verify)")
+        show_cols = ["Date", "Prev_Close", "Close", "Chg_%", "Deliv_Qty", "Total_Qty", "Deliv_%"]
+        st.dataframe(
+            tbl[show_cols], hide_index=True, width="stretch",
+            column_config={
+                "Prev_Close": st.column_config.NumberColumn("Prev Close", format="₹%.2f"),
+                "Close":      st.column_config.NumberColumn("Close", format="₹%.2f"),
+                "Chg_%":      st.column_config.NumberColumn("Chg %", format="%+.2f%%"),
+                "Deliv_Qty":  st.column_config.NumberColumn("Deliv Qty", format="%d"),
+                "Total_Qty":  st.column_config.NumberColumn("Total Qty", format="%d"),
+                "Deliv_%":    st.column_config.NumberColumn("Deliv %", format="%.2f%%"),
+            })
+        st.caption(f"**Reference averages (previous 2M):**  "
+                   f"Deliv Qty: **{int(dq_3m):,}**  |  Deliv %: **{dp_3m:.2f}%**  —  "
+                   f"ye numbers NSE bhavcopy se direct aate hain, koi calculation nahi.")
+    except Exception as ex:
+        st.warning(f"Last 5 days table error: {ex}")
 
     wf = E.weekly_flows(g, 12)
     fig2 = go.Figure(go.Bar(x=[d.strftime("%d %b") for d, _ in wf], y=[f for _, f in wf],
@@ -311,6 +373,7 @@ TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Ent
               "Score", "Signal", "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage",
               "Deliv_Qty_X", "Today_X", "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M",
               "Acc_Days", "Range_Pct", "Chg_Pct", "RS_1M", "Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr",
+              "Turnover_1M_Cr", "Turnover_X", "Trades_1M_Avg", "Trades_per_Cr", "Close_vs_Avg",
               "Bulk_Flag", "Bulk_Net_Cr", "Deals_Today", "Appearances_120D", "Days_Since_First", "Sector"]
 TABLE_CFG = {
     "Symbol": st.column_config.TextColumn("Symbol", pinned=True),
@@ -339,6 +402,18 @@ TABLE_CFG = {
     "RS_1M": st.column_config.NumberColumn("RS vs Nifty 1M", format="%+.1f%%"),
     "Deliv_Val_1M_Cr": st.column_config.NumberColumn("Deliv val 1M", format="₹%.1f Cr"),
     "Deliv_Val_3M_Cr": st.column_config.NumberColumn("Deliv val prev 2M", format="₹%.1f Cr"),
+    "Turnover_1M_Cr": st.column_config.NumberColumn("Turnover 1M", format="₹%.1f Cr",
+                                                    help="Last 1 mahine ka total turnover (₹ Cr me). NSE official data."),
+    "Turnover_X": st.column_config.NumberColumn("Turnover 1M÷3M", format="%.2fx",
+                                                help="1M avg daily turnover ÷ prev 2M avg. Paisa flow badh raha?"),
+    "Trades_1M_Avg": st.column_config.NumberColumn("Trades/day (1M)", format="%d",
+                                                   help="Roz kitne trades. Bahut zyada = retail frenzy, kam = institutional."),
+    "Trades_per_Cr": st.column_config.NumberColumn("Trades/₹Cr", format="%.1f",
+                                                   help="Kam value = big players (few trades, high value). "
+                                                        "Zyada = retail (many small trades)."),
+    "Close_vs_Avg": st.column_config.NumberColumn("Close vs Avg %", format="%+.2f%%",
+                                                  help="Positive = buyers ne end me kharida (bullish). "
+                                                       "Negative = sellers aggressive (bearish)."),
     "Bulk_Flag": st.column_config.TextColumn("Bulk/Block today"),
     "Bulk_Net_Cr": st.column_config.NumberColumn("Bulk net", format="₹%+.2f Cr"),
     "Deals_Today": st.column_config.NumberColumn("Deals today", format="%d"),
@@ -586,7 +661,8 @@ with tab4:
         st.plotly_chart(fig, width="stretch", key="cmp_chart")
         cc = [c for c in ["Symbol","Reentry","Price","Entry_Zone","SL","T1","T2","T3","Score","Signal",
                           "Buying_Status","Buy_Weeks","Setup","Stage","Deliv_Qty_X","Deliv_Per_Chg",
-                          "Net_Flow_1M","RS_1M","Bulk_Flag","Bulk_Net_Cr"] if c in scr.columns]
+                          "Net_Flow_1M","RS_1M","Turnover_1M_Cr","Turnover_X","Trades_per_Cr",
+                          "Close_vs_Avg","Bulk_Flag","Bulk_Net_Cr"] if c in scr.columns]
         st.dataframe(scr[scr.Symbol.isin(pick)][cc], hide_index=True, width="stretch")
 
 # ---------------------------- Tab 5: Bulk/Block --------------------------- #
@@ -657,7 +733,7 @@ with tab6:
             sym_f = f1.multiselect("Symbol", sorted(filt.Symbol.unique()), placeholder="All")
             side_f = f2.multiselect("Side", ["BUY","SELL"], default=["BUY","SELL"])
             if sym_f: filt = filt[filt.Symbol.isin(sym_f)]
-            filt = filt[filt.Buy_Sell.isin(side_f + [b.lower() for b in side_f]) | filt.Buy_Sell.isna()]
+            if side_f: filt = filt[filt.Buy_Sell.isin(side_f)]
             st.dataframe(filt.head(500), hide_index=True, width="stretch",
                          column_config={"Value_Cr": st.column_config.NumberColumn(format="₹%.2f Cr"),
                                         "Qty": st.column_config.NumberColumn(format="%d")})
@@ -674,6 +750,8 @@ with tab7:
     risk_pct = c2.slider("Risk per trade (%)", 0.25, 5.0, 1.0, 0.25)
     use_stock = c3.checkbox("Screener se stock pick karo", value=True)
 
+    default_entry = 100.0; default_sl = 92.0
+    sym_pick = "--"
     if use_stock:
         c4, c5 = st.columns(2)
         sym_pick = c4.selectbox("Stock", ["--"] + ALL_SYMS, key="ps_sym")
@@ -682,10 +760,6 @@ with tab7:
             default_entry = float(row.Entry)
             default_sl = float(row.SL)
             c5.info(f"Auto-fill: Entry ₹{default_entry:.2f}, SL ₹{default_sl:.2f}")
-        else:
-            default_entry = 100.0; default_sl = 92.0
-    else:
-        default_entry = 100.0; default_sl = 92.0
 
     c6, c7 = st.columns(2)
     entry_px = c6.number_input("Entry price (₹)", 0.01, 1_000_000.0, float(default_entry), 0.05)
