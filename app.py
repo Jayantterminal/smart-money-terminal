@@ -64,7 +64,7 @@ def load():
             pd.DataFrame(), {}
     asof = pd.Timestamp(hist.Date.max())
     nifty_df = M.fetch_index("^NSEI", "2y")
-    nifty_snap = M.snapshot(nifty_df, asof=asof)      # same session as the bhavcopy data
+    nifty_snap = M.snapshot(nifty_df[nifty_df["Date"] <= asof] if not nifty_df.empty else nifty_df)  # same session as bhavcopy
     scr = E.compute_screener(hist, (), MIN_TURNOVER_CR, E.fetch_sector_map())
     deals = pd.DataFrame(); insider = pd.DataFrame(); fiidii = None; breadth = {}
     outcomes = pd.DataFrame(); stats = {}
