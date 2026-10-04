@@ -356,15 +356,7 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         except Exception:
             buy_weeks = 0
 
-        # Prefer NSE's reported turnover when available. qty × close is only an
-        # approximation and can misclassify liquidity when the average traded price
-        # differs materially from the close.
-        _turn_n = min(21, n)
-        if "TURNOVER_LACS" in g.columns:
-            _turn = pd.to_numeric(g["TURNOVER_LACS"], errors="coerce").tail(_turn_n)
-            turnover_cr = float(_turn.mean() / 100.0) if _turn.notna().any() else 0.0
-        else:
-            turnover_cr = float((v[-_turn_n:] * c[-_turn_n:]).sum() / 1e7 / max(1, _turn_n))
+        turnover_cr = float((v[-min(21, n):] * c[-min(21, n):]).sum() / 1e7 / min(21, n))
 
         lb_start = max(0, n - 30); lb_end = max(lb_start, n - 2)
         if lb_end - lb_start >= 5:
@@ -497,22 +489,14 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         except Exception:
             pass
 
-        score = 0
-        if deliv_qty_x >= 1.5:   score += 20
-        elif deliv_qty_x >= 1.2: score += 14
-        elif deliv_qty_x >= 1.05: score += 7
-        if deliv_per_chg >= 8:   score += 15
-        elif deliv_per_chg >= 4: score += 10
-        elif deliv_per_chg > 0:  score += 4
-        if net_flow_1m >= 30:    score += 20
-        elif net_flow_1m >= 15:  score += 14
-        elif net_flow_1m > 0:    score += 7
-        if buy_weeks >= 4:       score += 15
-        elif buy_weeks >= 3:     score += 11
-        elif buy_weeks >= 2:     score += 6
-        if setup in ("In range (base)", "Breakout"): score += 10
-        if price >= rng_lo: score += 10
-        if today_dq >= dq_ref: score += 10
+        delivery_score = 20 if deliv_qty_x >= 1.5 else 14 if deliv_qty_x >= 1.2 else 7 if deliv_qty_x >= 1.05 else 0
+        delivery_pct_score = 15 if deliv_per_chg >= 8 else 10 if deliv_per_chg >= 4 else 4 if deliv_per_chg > 0 else 0
+        flow_score = 20 if net_flow_1m >= 30 else 14 if net_flow_1m >= 15 else 7 if net_flow_1m > 0 else 0
+        trend_score = 15 if buy_weeks >= 4 else 11 if buy_weeks >= 3 else 6 if buy_weeks >= 2 else 0
+        setup_score = 10 if setup in ("In range (base)", "Breakout") else 0
+        structure_score = 10 if price >= rng_lo else 0
+        activity_score = 10 if today_dq >= dq_ref else 0
+        score = delivery_score + delivery_pct_score + flow_score + trend_score + setup_score + structure_score + activity_score
 
         if score >= 70 and net_flow_1m > 20: signal = "Strong Accumulation"
         elif score >= 50:                    signal = "Accumulation"
@@ -536,7 +520,9 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
             "Deliv_Per_DoD": round(dp_dod_pp, 2),
             "Deliv_3D_Ratio": round(dq_3d_ratio, 2),
             "Net_Flow_1M": round(net_flow_1m, 1), "Net_Flow_3M": round(net_flow_3m, 1),
-            "Score": int(score), "Signal": signal,
+            "Score": int(score), "Score_Delivery": int(delivery_score), "Score_DeliveryPct": int(delivery_pct_score),
+            "Score_Flow": int(flow_score), "Score_Trend": int(trend_score), "Score_Setup": int(setup_score),
+            "Score_Structure": int(structure_score), "Score_Activity": int(activity_score), "Signal": signal,
             "Buying_Status": buying_status, "Buy_Weeks": int(buy_weeks),
             "Fresh": fresh, "Last5": last5_str,
             "Last5_X": round(last5_x, 2), "Today_X": round(today_x, 2),
@@ -757,29 +743,12 @@ def market_breadth(hist, scr, nifty=None):
 
 # ============ SIGNAL LOG ============ #
 def load_signal_log():
-    """Load the signal journal and normalize legacy rows.
-
-    Older project versions wrote every scanned stock to signals_log.csv.
-    The current journal is intentionally accumulation-only, so legacy rows are
-    filtered out here instead of contaminating re-entry/outcome statistics.
-    """
     if not os.path.exists(SIGNALS_CSV):
         return pd.DataFrame()
     try:
         df = pd.read_csv(SIGNALS_CSV)
-        required = {"run_date", "symbol", "signal", "score", "price", "entry", "sl", "t1", "t2", "t3"}
-        if not required.issubset(df.columns):
-            return pd.DataFrame()
-        df["run_date"] = pd.to_datetime(df["run_date"], errors="coerce").dt.normalize()
-        df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
-        df["signal"] = df["signal"].astype(str).str.strip()
-        # Only current accumulation signals belong in this journal.
-        df = df[df["signal"].isin(ACC_SIGNALS)].copy()
-        df = df.dropna(subset=["run_date", "symbol"])
-        # One symbol/day is the canonical record.
-        df = df.sort_values(["run_date", "symbol"]).drop_duplicates(
-            subset=["run_date", "symbol"], keep="last"
-        ).reset_index(drop=True)
+        if "run_date" in df.columns:
+            df["run_date"] = pd.to_datetime(df["run_date"], errors="coerce")
         return df
     except Exception:
         return pd.DataFrame()
@@ -809,11 +778,8 @@ def log_signals(scr, asof):
         new_df = pd.DataFrame(rows, columns=["run_date", "symbol", "signal", "score", "price",
                                              "entry", "sl", "t1", "t2", "t3"])
         if os.path.exists(SIGNALS_CSV):
-            # Use the normalized loader so legacy "all stocks" journal rows
-            # cannot survive into the new accumulation-only journal.
-            old = load_signal_log().copy()
-            if not old.empty:
-                old = old[old["run_date"].astype(str).str[:10] != rd]
+            old = pd.read_csv(SIGNALS_CSV)
+            old = old[old["run_date"].astype(str) != rd]
             combined = pd.concat([old, new_df], ignore_index=True)
         else:
             combined = new_df
@@ -830,86 +796,42 @@ def log_signals(scr, asof):
 
 
 def signal_outcomes(hist):
-    """Evaluate logged signals without look-ahead.
-
-    Rules:
-      * The signal-day close is not treated as an automatic entry.
-      * Entry becomes active only when a later daily bar trades through Entry.
-      * After entry, the first SL/T1/T2/T3 event is recorded.
-      * If a daily bar touches both SL and a target, SL wins (conservative;
-        daily OHLC cannot reveal the intraday order).
-    """
     log = load_signal_log()
     if log.empty or hist is None or hist.empty:
         return pd.DataFrame()
-
     h = hist.copy()
-    h["Date"] = pd.to_datetime(h["Date"], errors="coerce").dt.normalize()
+    h["Date"] = pd.to_datetime(h["Date"], errors="coerce")
     h = h.dropna(subset=["Date", "Symbol", "LOW_PRICE", "HIGH_PRICE"])
-    h["Symbol"] = h["Symbol"].astype(str).str.strip().str.upper()
     grouped = {sym: g.sort_values("Date") for sym, g in h.groupby("Symbol")}
-
-    rows = []
+    out_rows = []
     for _, r in log.iterrows():
         try:
-            sym = str(r["symbol"]).strip().upper()
-            rd = pd.Timestamp(r["run_date"]).normalize()
-            entry = float(r.get("entry", 0) or 0)
+            sym = str(r["symbol"])
+            rd = pd.to_datetime(r["run_date"])
             sl = float(r.get("sl", 0) or 0)
             t1 = float(r.get("t1", 0) or 0)
             t2 = float(r.get("t2", 0) or 0)
             t3 = float(r.get("t3", 0) or 0)
             g = grouped.get(sym)
-            if g is None or entry <= 0 or sl <= 0:
+            if g is None or rd is None or pd.isna(rd):
                 continue
-
-            future = g[g.Date > rd].copy()
-            entry_date = None
-            exit_date = None
-            exit_event = None
-            days_tracked = len(future)
-
-            for _, bar in future.iterrows():
-                lo = float(bar.LOW_PRICE)
-                hi = float(bar.HIGH_PRICE)
-                d = pd.Timestamp(bar.Date).normalize()
-
-                # Entry trigger: later session must actually trade through entry.
-                if entry_date is None:
-                    if lo <= entry <= hi:
-                        entry_date = d
-                    continue
-
-                # Conservative daily-bar ordering: SL wins if both sides were touched.
-                if lo <= sl:
-                    exit_date, exit_event = d, "SL"
-                    break
-                if t1 > 0 and hi >= t1:
-                    exit_date, exit_event = d, "T1"
-                    break
-                if t2 > 0 and hi >= t2:
-                    exit_date, exit_event = d, "T2"
-                    break
-                if t3 > 0 and hi >= t3:
-                    exit_date, exit_event = d, "T3"
-                    break
-
-            rows.append({
-                "run_date": rd,
-                "symbol": sym,
-                "entry_triggered": int(entry_date is not None),
-                "entry_date": entry_date,
-                "exit_event": exit_event or "",
-                "exit_date": exit_date,
-                "hit_sl": int(exit_event == "SL"),
-                "hit_t1": int(exit_event == "T1"),
-                "hit_t2": int(exit_event == "T2"),
-                "hit_t3": int(exit_event == "T3"),
-                "days_tracked": days_tracked,
+            after = g[g.Date > rd]
+            if after.empty:
+                out_rows.append({"run_date": rd, "symbol": sym,
+                                 "hit_sl": 0, "hit_t1": 0, "hit_t2": 0, "hit_t3": 0,
+                                 "days_tracked": 0})
+                continue
+            out_rows.append({
+                "run_date": rd, "symbol": sym,
+                "hit_sl": int((after.LOW_PRICE <= sl).any()) if sl > 0 else 0,
+                "hit_t1": int((after.HIGH_PRICE >= t1).any()) if t1 > 0 else 0,
+                "hit_t2": int((after.HIGH_PRICE >= t2).any()) if t2 > 0 else 0,
+                "hit_t3": int((after.HIGH_PRICE >= t3).any()) if t3 > 0 else 0,
+                "days_tracked": len(after),
             })
         except Exception:
             continue
-    return pd.DataFrame(rows)
+    return pd.DataFrame(out_rows)
 
 
 def _episodes(dates, gap_days):
@@ -997,3 +919,78 @@ def reentry_history(symbol, limit=20, outcomes=None):
         return d[["Date", "Signal", "Score", "Price", "Entry", "SL", "SL_Hit"]]
     except Exception:
         return d
+
+
+def compute_10d_bhavcopy(hist, sector_map=None):
+    """Build a security-wise 10-session activity view from NSE bhavcopy data."""
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    h = hist.copy()
+    h["Date"] = pd.to_datetime(h["Date"], errors="coerce")
+    h = h.dropna(subset=["Date", "Symbol", "CLOSE_PRICE"]).sort_values(["Symbol", "Date"])
+    dates = sorted(h.Date.unique())[-10:]
+    h = h[h.Date.isin(dates)].copy()
+    if h.empty:
+        return pd.DataFrame()
+    rows = []
+    sector_map = sector_map or {}
+    for sym, g in h.groupby("Symbol", sort=False):
+        g = g.sort_values("Date").copy()
+        if len(g) < 5:
+            continue
+        close = pd.to_numeric(g.CLOSE_PRICE, errors="coerce")
+        qty = pd.to_numeric(g.TTL_TRD_QNTY, errors="coerce").fillna(0)
+        dq = pd.to_numeric(g.DELIV_QTY, errors="coerce").fillna(0)
+        dp = pd.to_numeric(g.DELIV_PER, errors="coerce")
+        turn = qty * close / 1e7
+        price = float(close.iloc[-1])
+        p1 = float(close.iloc[0])
+        def ret(n):
+            return float((close.iloc[-1] / close.iloc[-min(n, len(close))] - 1) * 100) if p1 > 0 else 0.0
+        avg_vol = float(qty.mean())
+        latest_vol = float(qty.iloc[-1])
+        avg_turn = float(turn.mean())
+        deliv_trend = float(dp.iloc[-1] - dp.mean()) if dp.notna().any() else 0.0
+        positive = int((close.diff() > 0).sum())
+        active = int((qty > qty.mean()).sum())
+        # Delivery-weighted activity score, capped 0..100.
+        dscore = float(dp.fillna(0).mean()) / 100 * 25
+        volscore = min(25.0, max(0.0, (latest_vol / avg_vol if avg_vol else 0) * 12.5))
+        ret_score = min(30.0, max(0.0, (ret(10) + 10) * 1.5))
+        cons_score = min(20.0, active * 2.0)
+        score = round(min(100.0, dscore + volscore + ret_score + cons_score), 1)
+        rows.append({"Symbol": sym, "Sector": sector_map.get(str(sym).upper(), "Other"),
+                     "Price": price, "Ret_1D": ret(2), "Ret_3D": ret(3), "Ret_5D": ret(5),
+                     "Ret_10D": ret(10), "Avg_Vol_10D": avg_vol, "Latest_Vol": latest_vol,
+                     "Vol_vs_Avg": latest_vol / avg_vol if avg_vol else 0.0,
+                     "Delivery_Pct": float(dp.iloc[-1]) if pd.notna(dp.iloc[-1]) else 0.0,
+                     "Delivery_Trend": deliv_trend, "Turnover_10D_Cr": avg_turn,
+                     "Activity_Score": score, "Positive_Days": positive, "Active_Days": active,
+                     "Liquidity": "Liquid" if avg_turn >= 10 else "Thin"})
+    return pd.DataFrame(rows).sort_values(["Activity_Score", "Ret_10D"], ascending=False).reset_index(drop=True)
+
+
+def outcome_dashboard(hist, log=None):
+    """Research backtest: valid logged entry signals only. Same-day SL wins if both SL/T1 touch."""
+    if log is None: log = load_signal_log()
+    if hist is None or hist.empty or log is None or log.empty: return pd.DataFrame()
+    h=hist.copy(); h["Date"]=pd.to_datetime(h["Date"],errors="coerce")
+    h=h.dropna(subset=["Date","Symbol","LOW_PRICE","HIGH_PRICE","CLOSE_PRICE"])
+    grouped={s:g.sort_values("Date") for s,g in h.groupby("Symbol")}
+    rows=[]
+    for _,r in log.iterrows():
+        try:
+            sym=str(r.symbol); entry=float(r.entry); sl=float(r.sl); t1=float(r.t1); rd=pd.Timestamp(r.run_date)
+            if entry<=0 or sl<=0 or t1<=entry: continue
+            g=grouped.get(sym); after=g[g.Date>rd] if g is not None else pd.DataFrame()
+            status="Open"; ret=0.0; days=0
+            for _,bar in after.iterrows():
+                days+=1; low=float(bar.LOW_PRICE); high=float(bar.HIGH_PRICE); close=float(bar.CLOSE_PRICE)
+                if low<=sl:
+                    status="SL"; ret=(sl/entry-1)*100; break
+                if high>=t1:
+                    status="T1"; ret=(t1/entry-1)*100; break
+                ret=(close/entry-1)*100
+            rows.append({"run_date":rd,"symbol":sym,"status":status,"return_pct":ret,"days":days})
+        except Exception: continue
+    return pd.DataFrame(rows)

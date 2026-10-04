@@ -92,7 +92,7 @@ def main() -> int:
         status["telegram"] = "already sent for this date"
     else:
         msg = A.format_telegram_alert(scr, deals, breadth, f"{asof:%d %b %Y}",
-                                      top_n=10, nifty=nifty_snap, stale_deals=stale_deals)
+                                      top_n=10, nifty=nifty_df, stale_deals=stale_deals)
         ok, why = A.send_telegram_message(token, chat, msg)
         status["telegram"] = "sent" if ok else f"failed: {why}"
         if ok:

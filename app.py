@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
 import engine as E
@@ -28,11 +27,11 @@ st.set_page_config(page_title="Smart Money Terminal", page_icon="📈", layout="
 
 st.markdown("""
 <style>
-.block-container{padding-top:2.5rem;max-width:1500px;padding-bottom:3rem}
+.block-container{padding-top:1rem;max-width:1500px}
 .topbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;
  padding:12px 18px;border-radius:12px;background:linear-gradient(90deg,#0f172a,#1e293b);
  border:1px solid #334155;margin-bottom:14px}
-.brand{font-size:1.35rem;font-weight:800;color:#f8fafc;letter-spacing:.5px;white-space:nowrap}
+.brand{font-size:1.35rem;font-weight:800;color:#f8fafc;letter-spacing:.5px}
 .brand span{color:#22c55e}
 .meta{color:#94a3b8;font-size:.82rem}
 .kpi{background:#0f172a;border:1px solid #334155;border-radius:12px;padding:12px 16px;height:100%}
@@ -42,13 +41,9 @@ st.markdown("""
 .g{color:#22c55e!important}.r{color:#ef4444!important}.y{color:#f59e0b!important}
 .why{background:#0f172a;border-left:3px solid #22c55e;padding:8px 14px;margin:5px 0;
  border-radius:6px;color:#e2e8f0;font-size:.9rem}
-.st-key-kpis button{width:100%;min-height:82px;height:auto;border-radius:12px;border:1px solid #334155;
- background:#0f172a;white-space:normal!important;line-height:1.2;padding:10px 8px;overflow:visible}
-.st-key-kpis button p{font-size:.82rem;font-weight:650;white-space:normal!important;overflow:visible;line-height:1.25}
-.rotation-card{background:#111827;border:1px solid #334155;border-radius:14px;padding:14px 16px;margin:8px 0}
-.rotation-title{font-size:1.05rem;font-weight:800;color:#f8fafc}
-.rotation-sub{color:#94a3b8;font-size:.82rem;margin-top:3px}
-.tv-frame{border:1px solid #334155;border-radius:14px;overflow:hidden;background:#0b1220}
+.st-key-kpis button{width:100%;height:92px;border-radius:12px;border:1px solid #334155;
+ background:#0f172a;white-space:pre-line;line-height:1.35}
+.st-key-kpis button p{font-size:.95rem;font-weight:600}
 .st-key-kpis button:hover{border-color:#22c55e}
 </style>
 """, unsafe_allow_html=True)
@@ -66,11 +61,13 @@ def load():
     hist, info = E.fetch_history(65)
     if hist.empty:
         return hist, pd.DataFrame(), info, E.now_ist(), pd.DataFrame(), None, pd.DataFrame(), {}, {}, \
-            pd.DataFrame(), {}
+            pd.DataFrame(), {}, pd.DataFrame()
     asof = pd.Timestamp(hist.Date.max())
     nifty_df = M.fetch_index("^NSEI", "2y")
     nifty_snap = M.snapshot(nifty_df[nifty_df["Date"] <= asof] if not nifty_df.empty else nifty_df)  # same session as bhavcopy
-    scr = E.compute_screener(hist, (), MIN_TURNOVER_CR, E.fetch_sector_map())
+    sector_map = E.fetch_sector_map()
+    scr = E.compute_screener(hist, (), MIN_TURNOVER_CR, sector_map)
+    bh10 = E.compute_10d_bhavcopy(hist, sector_map)
     deals = pd.DataFrame(); insider = pd.DataFrame(); fiidii = None; breadth = {}
     outcomes = pd.DataFrame(); stats = {}
     if not scr.empty:
@@ -85,28 +82,19 @@ def load():
         except Exception: insider = pd.DataFrame()
         try: breadth = E.market_breadth(hist, scr, nifty_df)
         except Exception: breadth = {}
-        # Re-entry/outcomes are computed from the journal BEFORE today's rows
-        # are written. Writing is deliberately outside @st.cache_data.
+        # re-entry: previous days' log only -> then log today's accumulation signals (once per load)
         try:
             outcomes = E.signal_outcomes(hist)
             scr = E.reentry_stats(scr, asof, outcomes)
+            E.log_signals(scr, asof)
         except Exception:
             scr["Reentry"] = "🆕 First time"
             scr["Appearances_120D"] = 1
             scr["Days_Since_First"] = 0
-    return hist, scr, info, E.now_ist(), deals, fiidii, insider, breadth, nifty_snap, outcomes, stats
+    return hist, scr, info, E.now_ist(), deals, fiidii, insider, breadth, nifty_snap, outcomes, stats, bh10
 
 
-hist, scr, info, fetched, deals, fiidii, insider, breadth, nifty_snap, outcomes, stats = load()
-
-# Cached functions must not perform file writes. Keep today's journal write
-# idempotent per Streamlit session/date.
-if not hist.empty and not scr.empty:
-    _journal_key = f"{pd.Timestamp(hist.Date.max()).date()}"
-    if st.session_state.get("_journal_written_for") != _journal_key:
-        E.log_signals(scr, pd.Timestamp(hist.Date.max()))
-        st.session_state["_journal_written_for"] = _journal_key
-
+hist, scr, info, fetched, deals, fiidii, insider, breadth, nifty_snap, outcomes, stats, bh10 = load()
 if hist.empty or scr.empty:
     st.error("NSE data could not be loaded. NSE may be blocking this server. "
              f"Network errors: {info['errors']}. Refresh after a few minutes.")
@@ -119,6 +107,14 @@ if "Ret_3M" not in scr.columns:
 asof = hist.Date.max()
 
 ALL_SYMS = sorted(scr.Symbol.tolist())
+if not scr.empty:
+    def _priority(r):
+        if bool(r.get("Wide_Range",False)) or str(r.get("Entry_Status",""))=="Above zone (wait)": return "WATCH / EXTENDED"
+        if str(r.get("Signal",""))=="Strong Accumulation" and str(r.get("Buying_Status",""))=="Continuing": return "HIGH PRIORITY"
+        if str(r.get("Signal",""))=="Accumulation": return "RESEARCH"
+        if str(r.get("Signal",""))=="Distribution": return "AVOID / REVIEW"
+        return "WATCH"
+    scr["Priority"] = scr.apply(_priority, axis=1)
 NEW_LISTINGS = sorted(scr[scr.Is_New_Listing].Symbol.tolist()) if "Is_New_Listing" in scr.columns else []
 DEALS_STALE = bool(stats.get("deals_stale", False))
 DEALS_DATE = stats.get("deals_date")
@@ -158,7 +154,7 @@ with st.sidebar:
         """)
     env_tok, env_chat = A.telegram_creds_from_env()
     if env_tok and env_chat:
-        st.success("✅ Telegram environment credentials found")
+        st.success("✅ GitHub Secrets me token mila")
     tg_token = st.text_input("Bot Token", value=st.session_state.get("tg_token", ""), type="password")
     tg_chat  = st.text_input("Chat ID",   value=st.session_state.get("tg_chat", ""))
     if st.button("💾 Save token"):
@@ -166,7 +162,7 @@ with st.sidebar:
         st.session_state["tg_chat"]  = tg_chat
         st.success("Saved for this session.")
     st.caption("Source: NSE bhavcopy + bulk/block + FII/DII + Yahoo Nifty (EOD). "
-               "Analysis tool only; signals are heuristic, not guaranteed trade outcomes.")
+               "Analysis tool only, not investment advice.")
 
 st.markdown(f"""
 <div class="topbar">
@@ -203,6 +199,21 @@ if fiidii or breadth or nifty_snap:
             f"Source: {breadth.get('nifty_source','-')}")
         kpi(c4, "Breadth (% >50DMA)", f"{breadth.get('breadth_pct_50','-')}%",
             f"20DMA: {breadth.get('breadth_pct_20','-')}%")
+
+# Market regime + data health
+regime_score=0
+if nifty_snap:
+    regime_score += 1 if nifty_snap.get("price",0) > (nifty_snap.get("dma20") or 10**99) else -1
+    regime_score += 1 if nifty_snap.get("price",0) > (nifty_snap.get("dma50") or 10**99) else -1
+    regime_score += 1 if nifty_snap.get("price",0) > (nifty_snap.get("dma200") or 10**99) else -1
+if breadth: regime_score += 1 if breadth.get("breadth_pct_50",0)>=55 else -1
+if fiidii: regime_score += 1 if fiidii.get("fii_net",0)>0 else -1
+regime="Bullish" if regime_score>=3 else "Bearish" if regime_score<=-2 else "Neutral / Selective"
+rc1,rc2,rc3,rc4=st.columns(4)
+kpi(rc1,"Market Regime",regime,"Nifty + breadth + FII/DII", "g" if regime=="Bullish" else "r" if regime=="Bearish" else "y")
+kpi(rc2,"Bhavcopy",f"{asof:%d %b %Y}",f"{info.get('days',0)} sessions | delivery {info.get('delivery_cov',0)}%")
+kpi(rc3,"Data Health","Healthy" if info.get("errors",0)<=2 else "Check",f"Missing {info.get('missing',0)} | Errors {info.get('errors',0)}")
+kpi(rc4,"10D Universe",f"{len(bh10):,}","Before liquidity/price filters")
 
 if DEALS_STALE:
     st.info(f"ℹ️ Bulk/block deals aaj ke nahi (last: {DEALS_DATE}). NSE ne abhi publish nahi kiya.")
@@ -299,6 +310,10 @@ def render_detail(sym, k):
         "Buyers end me active" if cva > 0 else "Sellers end me active",
         "g" if cva > 0.2 else "r" if cva < -0.2 else "")
 
+    st.markdown("#### 🧩 Score breakdown")
+    scols=st.columns(7)
+    score_parts=[("Delivery", "Score_Delivery"),("Delivery %", "Score_DeliveryPct"),("Flow", "Score_Flow"),("Trend", "Score_Trend"),("Setup", "Score_Setup"),("Structure", "Score_Structure"),("Activity", "Score_Activity")]
+    for cc,(lab,key) in zip(scols,score_parts): kpi(cc,lab,f"{int(r.get(key,0))}","points")
     st.markdown("#### Trade plan (range based)")
     c = st.columns(5)
     kpi(c[0], "Price vs Entry zone", f"₹{r.Price:,.2f}  |  ₹{r.Entry_Low:,.2f}–{r.Entry_High:,.2f}",
@@ -438,7 +453,7 @@ def detail_dialog(sym):
     render_detail(sym, "dlg")
 
 
-TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3",
+TABLE_COLS = ["Priority", "Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3",
               "Score", "Signal", "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage",
               "Deliv_Qty_X", "Today_X", "Deliv_Qty_DoD", "Deliv_Per_DoD", "Deliv_3D_Ratio",
               "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M",
@@ -446,6 +461,7 @@ TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Ent
               "Turnover_1M_Cr", "Turnover_X", "Trades_1M_Avg", "Trades_per_Cr", "Close_vs_Avg",
               "Bulk_Flag", "Bulk_Net_Cr", "Deals_Today", "Appearances_120D", "Days_Since_First", "Sector"]
 TABLE_CFG = {
+    "Priority": st.column_config.TextColumn("Priority"),
     "Symbol": st.column_config.TextColumn("Symbol", pinned=True),
     "Reentry": st.column_config.TextColumn("Re-entry"),
     "Is_New_Listing": st.column_config.CheckboxColumn("🆕 New"),
@@ -509,9 +525,9 @@ def stock_table(d, name, height=560):
     return None
 
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "🔎 Screener", "🔄 Rotation", "🎯 Stock Plan", "⚖️ Compare",
-    "📜 Bulk/Block", "🌊 Breadth", "💰 Position Size",
+tab1, tab2, tab10, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "🔎 Screener", "🔄 Rotation", "📊 10D Bhavcopy", "🎯 Stock Plan", "⚖️ Compare",
+    "📜 Bulk/Block", "🌊 Market Breadth", "💰 Position Sizing", "🔔 Telegram",
 ])
 open_sym = None
 
@@ -618,8 +634,6 @@ with tab1:
     st.download_button("⬇️ CSV", d.to_csv(index=False).encode(), f"accumulation_{asof:%Y%m%d}.csv", "text/csv")
 
 with tab2:
-    st.markdown("### 🔄 Sector Money Rotation")
-    st.caption("Green = money flowing in • Red = money flowing out • Click a sector to open its chart.")
     try:
         sec = E.sector_rotation(pool)
     except Exception as ex:
@@ -627,116 +641,106 @@ with tab2:
     if sec is None or sec.empty:
         st.warning("Sector data nahi mila.")
     else:
-        # Clear quadrant summary: users should understand the map without decoding it.
-        qc = sec.groupby("Quadrant").size().to_dict()
-        qf = sec.groupby("Quadrant").Flow_1M.mean().to_dict()
+        qc = sec.groupby("Quadrant").size().to_dict() if "Quadrant" in sec.columns else {}
+        qf = sec.groupby("Quadrant").Flow_1M.mean().to_dict() if "Quadrant" in sec.columns else {}
         kc = st.columns(4)
-        descriptions = {
-            "Leading": "Money IN + momentum improving",
-            "Improving": "Money OUT, but momentum recovering",
-            "Weakening": "Money IN, but momentum fading",
-            "Lagging": "Money OUT + momentum weak",
-        }
         for i, qn_ in enumerate(["Leading", "Improving", "Weakening", "Lagging"]):
-            n = int(qc.get(qn_, 0)); fval = float(qf.get(qn_, 0.0) or 0)
+            n = int(qc.get(qn_, 0)); fval = qf.get(qn_, 0.0)
             cls = {"Leading": "g", "Improving": "g", "Weakening": "y", "Lagging": "r"}[qn_]
-            kpi(kc[i], QICON[qn_], f"{n} sectors", descriptions[qn_] + (f" | Flow {fval:+.1f}%" if n else ""), cls)
+            kpi(kc[i], f"{QICON[qn_]}", f"{n} sectors", f"Avg flow {fval:+.1f}%" if n else "-", cls)
 
-        st.markdown("#### Where is money moving?")
-        st.markdown("**🟢 Leading** = strongest inflow & improving momentum  •  **🔵 Improving** = recovering momentum  •  **🟡 Weakening** = inflow losing momentum  •  **🔴 Lagging** = outflow & weak momentum")
+        st.markdown("##### 🧭 Rotation map")
+        try:
+            xs = sec.Flow_1M.replace([np.inf, -np.inf], np.nan).dropna()
+            ys = sec.Flow_Chg.replace([np.inf, -np.inf], np.nan).dropna()
+            if not xs.empty and not ys.empty:
+                pad_x = max(abs(xs.min()), abs(xs.max())) * 1.15 + 5
+                pad_y = max(abs(ys.min()), abs(ys.max())) * 1.15 + 3
+                x0, x1 = -pad_x, pad_x; y0, y1 = -pad_y, pad_y
+                fig = go.Figure()
+                for xA, xB, yA, yB, col, label in [
+                    (0, x1, 0, y1, "#22c55e", "LEADING"), (x0, 0, 0, y1, "#3b82f6", "IMPROVING"),
+                    (0, x1, y0, 0, "#f59e0b", "WEAKENING"), (x0, 0, y0, 0, "#ef4444", "LAGGING"),
+                ]:
+                    fig.add_shape(type="rect", x0=xA, x1=xB, y0=yA, y1=yB,
+                                  fillcolor=col, opacity=0.055, line_width=0, layer="below")
+                    fig.add_annotation(x=(xA+xB)/2, y=yB*0.92, text=label, showarrow=False,
+                                       font=dict(size=11, color=col), opacity=0.6)
+                for qn, col in QCOL.items():
+                    s = sec[sec.Quadrant == qn]
+                    if s.empty: continue
+                    cc = []
+                    for cn in ["Acc_Pct","Stocks","Fresh","Deliv_Qty_X","Ret_1M"]:
+                        cc.append(s[cn].values if cn in s.columns else np.zeros(len(s)))
+                    fig.add_trace(go.Scatter(
+                        x=s.Flow_1M, y=s.Flow_Chg, mode="markers+text", text=s.Sector,
+                        textposition="top center", textfont=dict(size=10), name=QICON[qn],
+                        marker=dict(size=np.clip(s.Stocks*1.2+12, 14, 44) if "Stocks" in s.columns else 20,
+                                    color=col, opacity=0.85, line=dict(color="#0f172a", width=1.5)),
+                        customdata=np.stack(cc, axis=1),
+                        hovertemplate="<b>%{text}</b><br>Flow 1M: %{x:+.1f}%<br>Δ vs prev 2M: %{y:+.1f} pp<br>"
+                                      "Acc: %{customdata[0]}% of %{customdata[1]} stocks<extra></extra>"))
+                fig.add_vline(x=0, line_color="#475569"); fig.add_hline(y=0, line_color="#475569")
+                fig.update_layout(height=560, template="plotly_dark",
+                                  margin=dict(l=10,r=10,t=10,b=10),
+                                  xaxis=dict(title="Net buy flow 1M (%)", range=[x0,x1]),
+                                  yaxis=dict(title="Δ vs prev 2M (pp)", range=[y0,y1]),
+                                  legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"))
+                st.plotly_chart(fig, width="stretch", key="sec_chart")
+        except Exception as ex:
+            st.warning(f"Chart: {ex}")
 
-        # A cleaner horizontal sector board is easier to read than overlapping labels on the scatter.
-        board = sec.copy().sort_values(["Quadrant", "Flow_1M"], ascending=[True, False])
-        board["State"] = board["Quadrant"].map(QICON)
-        board["Money Flow"] = board["Flow_1M"]
-        board["Momentum Δ"] = board["Flow_Chg"]
-        board["Accumulation"] = board["Acc_Pct"]
-        board["Stocks"] = board["Stocks"].astype(int)
-        board_cols = [c for c in ["Sector", "State", "Stocks", "Accumulation", "Money Flow", "Momentum Δ", "Ret_1W", "Ret_1M"] if c in board.columns]
-        board = board[board_cols]
-        rot_event = st.dataframe(
-            board, hide_index=True, width="stretch", height=min(600, 44 + 38 * len(board)),
-            on_select="rerun", selection_mode="single-row", key="rotation_sector_board",
-            column_config={
-                "Sector": st.column_config.TextColumn("Sector", pinned=True, width="medium"),
-                "State": st.column_config.TextColumn("Rotation", width="small"),
-                "Stocks": st.column_config.NumberColumn("Stocks", format="%d"),
-                "Accumulation": st.column_config.ProgressColumn("Accumulation", min_value=0, max_value=100, format="%d%%"),
-                "Money Flow": st.column_config.NumberColumn("Money Flow 1M", format="%+.1f%%"),
-                "Momentum Δ": st.column_config.NumberColumn("Momentum Δ", format="%+.1f pp"),
-                "Ret_1W": st.column_config.NumberColumn("1W", format="%+.1f%%"),
-                "Ret_1M": st.column_config.NumberColumn("1M", format="%+.1f%%"),
-            },
-        )
-
-        # Preserve the original numeric rotation map as a compact analytical view.
-        with st.expander("📊 Detailed rotation map", expanded=False):
-            try:
-                xs = pd.to_numeric(sec.Flow_1M, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-                ys = pd.to_numeric(sec.Flow_Chg, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-                if not xs.empty and not ys.empty:
-                    pad_x = max(abs(xs.min()), abs(xs.max())) * 1.15 + 5
-                    pad_y = max(abs(ys.min()), abs(ys.max())) * 1.15 + 3
-                    x0, x1 = -pad_x, pad_x; y0, y1 = -pad_y, pad_y
-                    fig = go.Figure()
-                    for xA, xB, yA, yB, col, label in [
-                        (0, x1, 0, y1, "#22c55e", "LEADING"), (x0, 0, 0, y1, "#3b82f6", "IMPROVING"),
-                        (0, x1, y0, 0, "#f59e0b", "WEAKENING"), (x0, 0, y0, 0, "#ef4444", "LAGGING")]:
-                        fig.add_shape(type="rect", x0=xA, x1=xB, y0=yA, y1=yB, fillcolor=col, opacity=0.045, line_width=0, layer="below")
-                        fig.add_annotation(x=(xA+xB)/2, y=yB*0.92, text=label, showarrow=False, font=dict(size=11, color=col), opacity=0.6)
-                    for qn, col in QCOL.items():
-                        ss = sec[sec.Quadrant == qn]
-                        if ss.empty: continue
-                        fig.add_trace(go.Scatter(x=ss.Flow_1M, y=ss.Flow_Chg, mode="markers+text", text=ss.Sector,
-                            textposition="top center", textfont=dict(size=9), name=QICON[qn],
-                            marker=dict(size=np.clip(ss.Stocks*1.1+12, 14, 38), color=col, opacity=0.85, line=dict(color="#0f172a", width=1.5)),
-                            customdata=ss[["Sector"]].values,
-                            hovertemplate="<b>%{text}</b><br>Flow: %{x:+.1f}%<br>Momentum Δ: %{y:+.1f} pp<extra></extra>"))
-                    fig.add_vline(x=0, line_color="#475569"); fig.add_hline(y=0, line_color="#475569")
-                    fig.update_layout(height=520, template="plotly_dark", margin=dict(l=10,r=10,t=10,b=10),
-                                      xaxis_title="Net buy flow 1M (%)", yaxis_title="Δ vs previous 2M (pp)",
-                                      legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"))
-                    st.plotly_chart(fig, width="stretch", key="sec_chart")
-            except Exception as ex:
-                st.warning(f"Chart: {ex}")
-
-        selected_rows = rot_event.selection.rows if rot_event is not None else []
-        if selected_rows:
-            chosen = board.iloc[selected_rows[0]]["Sector"]
-            row = sec[sec.Sector == chosen].iloc[0]
-            st.markdown(f"### {QICON.get(row.Quadrant, '')} {chosen}")
-            st.caption(f"{row.Quadrant} • Money flow {row.Flow_1M:+.1f}% • Momentum Δ {row.Flow_Chg:+.1f} pp • {int(row.Stocks)} stocks • Accumulation {int(row.Acc_Pct)}%")
-
-            # Map sector names to NSE/TradingView sector indices where available.
-            tv_map = {
-                "Information Technology": "NSE:NIFTY_IT", "IT": "NSE:NIFTY_IT",
-                "Financial Services": "NSE:NIFTY_FIN_SERVICE", "Banking": "NSE:NIFTY_BANK",
-                "Private Bank": "NSE:NIFTY_PRIVATE_BANK", "PSU Bank": "NSE:NIFTY_PSU_BANK",
-                "Automobile and Auto Components": "NSE:NIFTY_AUTO", "Auto Components": "NSE:NIFTY_AUTO",
-                "Consumer Durables": "NSE:NIFTY_CONSR_DURBL", "FMCG": "NSE:NIFTY_FMCG",
-                "Pharmaceuticals": "NSE:NIFTY_PHARMA", "Healthcare": "NSE:NIFTY_HEALTHCARE",
-                "Metals & Mining": "NSE:NIFTY_METAL", "Metal": "NSE:NIFTY_METAL",
-                "Oil Gas & Consumable Fuels": "NSE:NIFTY_OIL_AND_GAS", "Oil Gas & Consumable Fuels": "NSE:NIFTY_OIL_AND_GAS", "Realty": "NSE:NIFTY_REALTY",
-                "Media Entertainment & Publication": "NSE:NIFTY_MEDIA", "Media": "NSE:NIFTY_MEDIA",
-            }
-            tv_symbol = tv_map.get(str(chosen))
-            if tv_symbol:
-                tv_url = "https://www.tradingview.com/embed/?symbol=" + tv_symbol.replace(":", "%3A") + "&interval=D&theme=dark&style=1&hide_top_toolbar=0&hide_legend=0&withdateranges=1&saveimage=0"
-                st.markdown(f"<div class='tv-frame'>", unsafe_allow_html=True)
-                components.iframe(tv_url, height=560, scrolling=False)
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.info("Is sector ka direct TradingView index mapping available nahi hai. Neeche sector performance chart diya hai.")
-                sd = pool[pool.Sector == chosen].copy()
-                if not sd.empty:
-                    chart = sd.nlargest(20, "Score")[["Symbol", "Ret_1M"]].sort_values("Ret_1M")
-                    fig_s = go.Figure(go.Bar(x=chart.Ret_1M, y=chart.Symbol, orientation="h"))
-                    fig_s.update_layout(height=500, template="plotly_dark", title=f"{chosen} — Top stocks 1M return", margin=dict(l=10,r=10,t=45,b=10))
-                    st.plotly_chart(fig_s, width="stretch", key="selected_sector_fallback")
-
-            sd = pool[pool.Sector == chosen].sort_values(["Score", "Deliv_Qty_X"], ascending=False)
+        sv = sec.copy()
+        if "Quadrant" in sv.columns: sv["Quadrant"] = sv.Quadrant.map(QICON)
+        if "Flow_Chg" in sv.columns: sv = sv.sort_values("Flow_Chg", ascending=False)
+        cfg = {"Sector": st.column_config.TextColumn(pinned=True),
+               "Acc_Pct": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d%%"),
+               "Flow_1M": st.column_config.NumberColumn(format="%+.1f%%"),
+               "Flow_Prev": st.column_config.NumberColumn(format="%+.1f%%"),
+               "Flow_Chg": st.column_config.NumberColumn(format="%+.1f pp"),
+               "Ret_1W": st.column_config.NumberColumn(format="%+.1f%%"),
+               "Ret_1M": st.column_config.NumberColumn(format="%+.1f%%"),
+               "Ret_3M": st.column_config.NumberColumn(format="%+.1f%%")}
+        ev = st.dataframe(sv, hide_index=True, width="stretch",
+                          height=min(560, 40 + 35*len(sv)),
+                          on_select="rerun", selection_mode="single-row", key="sec_tbl",
+                          column_config=cfg)
+        if ev.selection.rows:
+            chosen = sv.iloc[ev.selection.rows[0]].Sector
+            sd = pool[pool.Sector == chosen].sort_values(["Score","Deliv_Qty_X"], ascending=False)
             st.markdown(f"#### {chosen} — {len(sd)} stocks")
             open_sym = stock_table(sd, "sec", height=420) or open_sym
+
+with tab10:
+    st.markdown("### 📊 10 Days Bhavcopy — Sustained Activity Scanner")
+    st.caption("Last 10 NSE trading sessions. Default: price ≥ ₹100 and average turnover ≥ ₹10 Cr/day.")
+    if bh10.empty:
+        st.warning("10D bhavcopy data available nahi hai.")
+    else:
+        a,b,c,d=st.columns(4)
+        min_price=a.number_input("Min Price ₹",1.0,10000.0,100.0,10.0)
+        min_turn=b.number_input("Min avg turnover ₹Cr",0.0,1000.0,10.0,1.0)
+        min_active=c.number_input("Min active days",0,10,0,1)
+        min_score=d.number_input("Min activity score",0.0,100.0,0.0,5.0)
+        f10=bh10[(bh10.Price>=min_price)&(bh10.Turnover_10D_Cr>=min_turn)&(bh10.Active_Days>=min_active)&(bh10.Activity_Score>=min_score)].copy()
+        st.markdown("#### Numeric filters")
+        cols=st.columns(4); specs=[("10D Return %","Ret_10D",5.0),("Delivery %","Delivery_Pct",40.0),("Volume vs Avg","Vol_vs_Avg",1.5),("Turnover ₹Cr","Turnover_10D_Cr",10.0)]
+        for i,(label,col,default) in enumerate(specs):
+            op=cols[i].selectbox(label+" operator",[">",">=","=","<=","<"],key="op10"+col)
+            val=cols[i].number_input(label+" value",value=default,key="val10"+col)
+            if op==">": m=f10[col]>val
+            elif op==">=": m=f10[col]>=val
+            elif op=="=": m=f10[col].between(val-1e-9,val+1e-9)
+            elif op=="<=": m=f10[col]<=val
+            else: m=f10[col]<val
+            f10=f10[m]
+        sec10=st.multiselect("Sector",sorted(bh10.Sector.dropna().unique()))
+        if sec10: f10=f10[f10.Sector.isin(sec10)]
+        st.success(f"{len(f10):,} stocks match")
+        cfg={"Price":st.column_config.NumberColumn(format="₹%.2f"),"Ret_1D":st.column_config.NumberColumn("1D %",format="%+.2f%%"),"Ret_3D":st.column_config.NumberColumn("3D %",format="%+.2f%%"),"Ret_5D":st.column_config.NumberColumn("5D %",format="%+.2f%%"),"Ret_10D":st.column_config.NumberColumn("10D %",format="%+.2f%%"),"Vol_vs_Avg":st.column_config.NumberColumn("Vol / Avg",format="%.2fx"),"Delivery_Pct":st.column_config.NumberColumn("Delivery %",format="%.1f%%"),"Delivery_Trend":st.column_config.NumberColumn("Delivery trend pp",format="%+.1f"),"Turnover_10D_Cr":st.column_config.NumberColumn("Avg turnover",format="₹%.1f Cr"),"Activity_Score":st.column_config.ProgressColumn("Activity score",min_value=0,max_value=100,format="%.1f"),"Avg_Vol_10D":st.column_config.NumberColumn("10D avg volume",format="%.0f"),"Latest_Vol":st.column_config.NumberColumn("Latest volume",format="%.0f"),"Active_Days":st.column_config.NumberColumn("Active days",format="%d")}
+        show=["Symbol","Sector","Price","Ret_1D","Ret_3D","Ret_5D","Ret_10D","Avg_Vol_10D","Latest_Vol","Vol_vs_Avg","Delivery_Pct","Delivery_Trend","Turnover_10D_Cr","Activity_Score","Positive_Days","Active_Days","Liquidity"]
+        st.dataframe(f10[show],hide_index=True,width="stretch",height=650,column_config=cfg)
+        st.download_button("⬇️ Download 10D CSV",f10.to_csv(index=False).encode(),f"bhavcopy_10d_{asof:%Y%m%d}.csv","text/csv")
 
 with tab3:
     if NEW_LISTINGS:
@@ -799,6 +803,18 @@ with tab5:
 
 with tab6:
     st.markdown("### 🌊 Market Breadth + Nifty Trend")
+    od=E.outcome_dashboard(hist)
+    if not od.empty:
+        st.markdown("#### 📈 Signal Outcome Dashboard")
+        for days in [7,30,90]:
+            cutoff=pd.Timestamp(asof)-pd.Timedelta(days=days); x=od[od.run_date>=cutoff]
+            if x.empty: continue
+            closed=x[x.status.isin(["SL","T1"])]
+            wins=int((closed.status=="T1").sum()); losses=int((closed.status=="SL").sum())
+            winrate=wins/len(closed)*100 if len(closed) else 0
+            avg=x.return_pct.mean(); expectancy=x.return_pct.mean()
+            c=st.columns(5); kpi(c[0],f"{days}D Win rate",f"{winrate:.1f}%",f"{wins} T1 / {losses} SL"); kpi(c[1],"Avg return",f"{avg:+.2f}%",f"{len(x)} signals"); kpi(c[2],"Open",str(int((x.status=="Open").sum())),"Still tracking"); kpi(c[3],"Best",f"{x.return_pct.max():+.2f}%",""); kpi(c[4],"Worst",f"{x.return_pct.min():+.2f}%","")
+        st.caption("Research backtest uses logged entry signals only; if SL and T1 occur on the same day, SL is counted first. Past outcomes do not guarantee future results.")
     st.caption("Breadth sirf liquid screener universe pe (illiquid / stale stocks excluded).")
     if not breadth:
         st.error("Breadth data compute nahi ho paya. Refresh karo.")
@@ -859,77 +875,95 @@ with tab6:
 
 with tab7:
     st.markdown("### 💰 Position Sizing Calculator")
-    st.caption("Capital + risk + entry + stop loss + target → shares, capital deployed, estimated loss and target profit.")
-
+    st.caption("Capital + Risk % + Entry + SL → kitne shares kharido, max loss kitna.")
     c1, c2, c3 = st.columns(3)
-    capital = c1.number_input("Total capital (₹)", min_value=1000.0, max_value=100_000_000.0, value=100_000.0, step=1000.0, key="ps_capital")
-    risk_pct = c2.slider("Risk per trade (%)", 0.25, 5.0, 1.0, 0.25, key="ps_risk")
-    use_stock = c3.checkbox("Auto-fill from screener", value=True, key="ps_use_stock")
+    capital = c1.number_input("Total capital (₹)", 1000, 100_000_000, 100_000, 1000)
+    risk_pct = c2.slider("Risk per trade (%)", 0.25, 5.0, 1.0, 0.25)
+    use_stock = c3.checkbox("Screener se stock pick karo", value=True)
 
+    default_entry = 100.0; default_sl = 92.0
     sym_pick = "--"
-    default_entry, default_sl, default_target = 100.0, 92.0, 110.0
     if use_stock:
-        sym_pick = st.selectbox("Stock", ["--"] + ALL_SYMS, key="ps_sym")
+        c4, c5 = st.columns(2)
+        sym_pick = c4.selectbox("Stock", ["--"] + ALL_SYMS, key="ps_sym")
         if sym_pick != "--":
             row = scr[scr.Symbol == sym_pick].iloc[0]
             default_entry = float(row.Entry)
             default_sl = float(row.SL)
-            default_target = float(row.T1)
-            st.info(f"Auto-fill: Entry ₹{default_entry:.2f} • SL ₹{default_sl:.2f} • T1 ₹{default_target:.2f}")
+            c5.info(f"Auto-fill: Entry ₹{default_entry:.2f}, SL ₹{default_sl:.2f}")
 
-    # Use stock-specific keys so changing the stock actually refreshes the values instead of
-    # Streamlit retaining the previous symbol's number_input state.
-    entry_key = f"ps_entry_{sym_pick}"
-    sl_key = f"ps_sl_{sym_pick}"
-    target_key = f"ps_target_{sym_pick}"
-    if entry_key not in st.session_state:
-        st.session_state[entry_key] = float(default_entry)
-    if sl_key not in st.session_state:
-        st.session_state[sl_key] = float(default_sl)
-    if target_key not in st.session_state:
-        st.session_state[target_key] = float(default_target)
+    c6, c7 = st.columns(2)
+    entry_px = c6.number_input("Entry price (₹)", 0.01, 1_000_000.0, float(default_entry), 0.05)
+    sl_px    = c7.number_input("Stop loss (₹)",  0.01, 1_000_000.0, float(default_sl),   0.05)
 
-    c4, c5, c6 = st.columns(3)
-    entry_px = c4.number_input("Entry price (₹)", min_value=0.01, max_value=1_000_000.0, step=0.05, key=entry_key)
-    sl_px = c5.number_input("Stop loss (₹)", min_value=0.01, max_value=1_000_000.0, step=0.05, key=sl_key)
-    target_px = c6.number_input("Estimated target (₹)", min_value=0.01, max_value=1_000_000.0, step=0.05, key=target_key)
-
-    if entry_px <= sl_px:
-        st.error("Long trade ke liye Stop Loss entry se neeche hona chahiye.")
-    elif target_px <= entry_px:
-        st.error("Estimated target entry price se upar hona chahiye.")
+    risk_cap = capital * risk_pct / 100
+    per_share_risk = entry_px - sl_px
+    if per_share_risk <= 0:
+        st.error("SL entry se neeche hona chahiye (long trade ke liye).")
     else:
-        risk_cap = capital * risk_pct / 100.0
-        per_share_risk = entry_px - sl_px
-        shares_by_risk = int(risk_cap // per_share_risk)
-        shares_by_cap = int(capital // entry_px)
-        shares = max(0, min(shares_by_risk, shares_by_cap))
+        shares_by_risk = int(risk_cap / per_share_risk)
+        shares_by_cap = int(capital / entry_px)          # can't buy more than capital allows
+        shares = min(shares_by_risk, shares_by_cap)
         capital_deployed = shares * entry_px
-        estimated_loss = shares * per_share_risk
-        estimated_target_profit = shares * (target_px - entry_px)
-        pct_capital = capital_deployed / capital * 100 if capital else 0
-        target_pct = (target_px / entry_px - 1) * 100
-        rr = (target_px - entry_px) / per_share_risk if per_share_risk else 0
-
+        max_loss = shares * per_share_risk
+        pct_capital = capital_deployed / capital * 100 if capital > 0 else 0
         if shares_by_risk > shares_by_cap:
-            st.warning(f"Capital cap applied: risk ke hisaab se {shares_by_risk:,} shares, available capital ke hisaab se {shares_by_cap:,}.")
+            st.warning(f"SL bahut tight hai: risk ke hisaab se {shares_by_risk:,} shares aate, "
+                       f"lekin capital sirf {shares_by_cap:,} ka allow karta hai — capital cap laga diya.")
 
-        st.markdown("#### Trade size")
-        c7, c8, c9, c10 = st.columns(4)
-        kpi(c7, "Shares", f"{shares:,}", f"Risk budget ₹{risk_cap:,.0f}", "g" if shares else "r")
-        kpi(c8, "Capital deployed", f"₹{capital_deployed:,.0f}", f"{pct_capital:.1f}% of capital", "y" if pct_capital > 50 else "")
-        kpi(c9, "Estimated loss", f"₹{estimated_loss:,.0f}", f"{estimated_loss / capital * 100:.2f}% of capital", "r")
-        kpi(c10, "Estimated target", f"₹{target_px:,.2f}", f"+{target_pct:.1f}% • Profit ₹{estimated_target_profit:,.0f}", "g")
+        st.markdown("---")
+        c8, c9, c10, c11 = st.columns(4)
+        kpi(c8, "Shares", f"{shares:,}", "", "")
+        kpi(c9, "Capital deployed", f"₹{capital_deployed:,.0f}", f"{pct_capital:.1f}% of capital",
+            "y" if pct_capital > 50 else "")
+        kpi(c10, "Max loss", f"₹{max_loss:,.0f}", f"{max_loss / capital * 100:.2f}% of capital", "r")
+        kpi(c11, "Risk per share", f"₹{per_share_risk:.2f}",
+            f"{(per_share_risk/entry_px*100):.1f}% of entry")
 
-        c11, c12, c13 = st.columns(3)
-        kpi(c11, "Risk / share", f"₹{per_share_risk:.2f}", f"{per_share_risk / entry_px * 100:.1f}% of entry", "r")
-        kpi(c12, "Target profit", f"₹{estimated_target_profit:,.0f}", f"R:R {rr:.1f}x", "g")
-        kpi(c13, "Position value", f"₹{capital_deployed:,.0f}", f"{shares:,} × ₹{entry_px:,.2f}", "")
+        st.markdown("#### Target outcomes")
+        r = scr[scr.Symbol == sym_pick].iloc[0] if use_stock and sym_pick != "--" else None
+        if r is not None:
+            targets = [("T1", float(r.T1)), ("T2", float(r.T2)), ("T3", float(r.T3))]
+            tc = st.columns(3)
+            for i, (name, tp) in enumerate(targets):
+                profit = shares * (tp - entry_px)
+                rr = (tp - entry_px) / per_share_risk if per_share_risk else 0
+                kpi(tc[i], f"{name} ₹{tp:.2f}", f"+₹{profit:,.0f}", f"R:R {rr:.1f}x", "g")
+        st.caption("⚠️ Ye ek calculator hai, recommendation nahi.")
 
-        if use_stock and sym_pick != "--":
-            r = scr[scr.Symbol == sym_pick].iloc[0]
-            st.caption(f"Screener reference: T1 ₹{float(r.T1):,.2f} • T2 ₹{float(r.T2):,.2f} • T3 ₹{float(r.T3):,.2f}. Calculator target is editable.")
-        st.caption("⚠️ Calculator mathematical estimate hai, trade recommendation nahi.")
+with tab8:
+    st.markdown("### 🔔 Telegram Alerts")
+    st.caption("Do tarike: (1) GitHub Actions daily bhejega, (2) App me manual 'Send now'.")
+    env_tok, env_chat = A.telegram_creds_from_env()
+    tok = env_tok or st.session_state.get("tg_token", "")
+    cid = env_chat or st.session_state.get("tg_chat", "")
+    if not tok or not cid:
+        st.warning("Pehle sidebar me Bot Token aur Chat ID save karo.")
+    else:
+        src = "GitHub Secrets" if env_tok and env_chat else "session"
+        st.success(f"Token source: {src} | Chat: {cid}")
+        st.markdown("---")
+        top_n = st.slider("Top N stocks in alert", 5, 25, 10)
+        if st.button("📤 Send alert now"):
+            msg = A.format_telegram_alert(scr, deals, breadth, f"{asof:%d %b %Y}",
+                                          top_n=top_n, nifty=nifty_snap, stale_deals=DEALS_STALE)
+            ok, tg_info = A.send_telegram_message(tok, cid, msg)
+            if ok:
+                st.success("✅ Alert bheja gaya! Phone check karo.")
+                with st.expander("Message preview"):
+                    st.code(msg)
+            else:
+                st.error(f"❌ Bhej nahi paya: {tg_info}")
+
+        st.markdown("---")
+        st.markdown("#### 🤖 Auto daily alert (GitHub Actions)")
+        st.markdown("""
+**Setup (ek baar):**
+1. GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**
+2. Add: `TELEGRAM_TOKEN` = bot token
+3. Add: `TELEGRAM_CHAT_ID` = chat id
+4. `.github/workflows/bhavcopy.yml` roz 7 PM IST pe auto chalega
+        """)
 
 if open_sym:
     detail_dialog(open_sym)
