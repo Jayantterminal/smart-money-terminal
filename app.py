@@ -1,8 +1,6 @@
 """
-app.py - Smart Money Terminal (v6)
-Full: screener, sector rotation, stock plan, compare, bulk/block,
-re-entry tracker, market breadth, FII/DII, insider trades, position sizing,
-Telegram alerts, DoD delivery metrics, 14-day verify table.
+app.py - Smart Money Terminal (v7)
+Fixed: Market breadth shows independently of FII/DII.
 """
 import hashlib
 from datetime import datetime
@@ -47,6 +45,68 @@ def kpi(col, label, value, sub="", cls=""):
                  f'<div class="d">{sub}</div></div>', unsafe_allow_html=True)
 
 
+def _compute_breadth_fallback(hist, scr):
+    """Fallback breadth computation - agar engine.market_breadth fail ho jaye."""
+    out = {"total": 0, "above_20dma": 0, "above_50dma": 0, "above_200dma": 0,
+           "advances": 0, "declines": 0, "breadth_pct_20": 0.0, "breadth_pct_50": 0.0,
+           "breadth_pct_200": 0.0, "ad_ratio": 0.0,
+           "nifty_price": 0.0, "nifty_20dma": 0.0, "nifty_50dma": 0.0, "nifty_200dma": 0.0,
+           "nifty_trend": "-"}
+    if hist is None or hist.empty:
+        return out
+    h = hist.copy()
+    h["Date"] = pd.to_datetime(h["Date"], errors="coerce")
+    h = h.dropna(subset=["Date", "CLOSE_PRICE"])
+    if h.empty:
+        return out
+    last_day = h.Date.max()
+    out["total"] = int(len(h[h.Date == last_day]))
+    if scr is not None and "Chg_Pct" in scr.columns:
+        out["advances"] = int((scr.Chg_Pct > 0).sum())
+        out["declines"] = int((scr.Chg_Pct < 0).sum())
+        tot = max(1, out["advances"] + out["declines"])
+        out["ad_ratio"] = round(out["advances"] / tot * 100, 1)
+
+    c20 = c50 = c200 = 0
+    d20 = d50 = d200 = 0
+    for sym, g in h.groupby("Symbol", sort=False):
+        g = g.sort_values("Date")
+        c = g["CLOSE_PRICE"].astype(float).values
+        if len(c) >= 20:
+            d20 += 1
+            if c[-1] > c[-20:].mean(): c20 += 1
+        if len(c) >= 50:
+            d50 += 1
+            if c[-1] > c[-50:].mean(): c50 += 1
+        if len(c) >= 200:
+            d200 += 1
+            if c[-1] > c[-200:].mean(): c200 += 1
+    out["above_20dma"] = c20
+    out["above_50dma"] = c50
+    out["above_200dma"] = c200
+    out["breadth_pct_20"] = round(100 * c20 / max(1, d20), 1)
+    out["breadth_pct_50"] = round(100 * c50 / max(1, d50), 1)
+    out["breadth_pct_200"] = round(100 * c200 / max(1, d200), 1)
+    try:
+        grp = h.groupby("Date")["CLOSE_PRICE"].median().reset_index().sort_values("Date")
+        nc = grp["CLOSE_PRICE"].values
+        if len(nc):
+            out["nifty_price"] = round(float(nc[-1]), 2)
+            if len(nc) >= 20: out["nifty_20dma"] = round(float(nc[-20:].mean()), 2)
+            if len(nc) >= 50: out["nifty_50dma"] = round(float(nc[-50:].mean()), 2)
+            if len(nc) >= 200: out["nifty_200dma"] = round(float(nc[-200:].mean()), 2)
+            p = nc[-1]
+            a50 = out["nifty_50dma"] and p > out["nifty_50dma"]
+            a200 = out["nifty_200dma"] and p > out["nifty_200dma"]
+            if a200 and a50: out["nifty_trend"] = "🟢 Bullish (above 50 & 200 DMA)"
+            elif a200: out["nifty_trend"] = "🟡 Cautious (above 200, below 50)"
+            elif a50: out["nifty_trend"] = "🟡 Mixed (above 50, below 200)"
+            else: out["nifty_trend"] = "🔴 Bearish (below 50 & 200 DMA)"
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner="Downloading NSE delivery + deals data (first load ~15 sec)...")
 def load():
     hist, info = E.fetch_history(65)
@@ -61,8 +121,14 @@ def load():
         except Exception: fiidii = None
         try: insider = A.fetch_insider_trades(days_back=7)
         except Exception: insider = pd.DataFrame()
-        try: breadth = E.market_breadth(hist, scr)
-        except Exception: breadth = {}
+        # Breadth: try engine, fallback to app-internal
+        try:
+            breadth = E.market_breadth(hist, scr)
+        except Exception:
+            breadth = {}
+        if not breadth:
+            try: breadth = _compute_breadth_fallback(hist, scr)
+            except Exception: breadth = {}
     return hist, scr, info, E.now_ist(), deals, fiidii, insider, breadth
 
 
@@ -123,8 +189,6 @@ with st.sidebar:
 **2.** Bot token milega → neeche paste karo
 **3.** Apne bot ko **@userinfobot** se apna chat_id milega → neeche paste karo
 **4.** "Save token" dabao
-
-**Daily 6:30 PM auto-alert ke liye** GitHub Actions setup chahiye (optional).
         """)
     tg_token = st.text_input("Bot Token", value=st.session_state.get("tg_token", ""), type="password")
     tg_chat  = st.text_input("Chat ID",   value=st.session_state.get("tg_chat", ""))
@@ -145,17 +209,29 @@ st.markdown(f"""
 if info["errors"]:
     st.warning(f"{info['errors']} din ka NSE data download nahi ho paya - Refresh karke dekho.")
 
-if fiidii:
+# ---- Top strip: FII/DII + Breadth (INDEPENDENT) ---- #
+if fiidii or breadth:
     c1, c2, c3, c4 = st.columns(4)
-    fnet = fiidii.get("fii_net", 0); dnet = fiidii.get("dii_net", 0)
-    kpi(c1, "FII net (₹ Cr)", f"{fnet:+,.0f}", f"Buy {fiidii.get('fii_buy',0):,.0f} | Sell {fiidii.get('fii_sell',0):,.0f}",
-        "g" if fnet > 0 else "r")
-    kpi(c2, "DII net (₹ Cr)", f"{dnet:+,.0f}", f"Buy {fiidii.get('dii_buy',0):,.0f} | Sell {fiidii.get('dii_sell',0):,.0f}",
-        "g" if dnet > 0 else "r")
-    kpi(c3, "Nifty proxy", f"{breadth.get('nifty_price','-')}",
-        f"20DMA {breadth.get('nifty_20dma','-')} | 50DMA {breadth.get('nifty_50dma','-')}")
-    kpi(c4, "Breadth (% >50DMA)", f"{breadth.get('breadth_pct_50','-')}%",
-        f"20DMA: {breadth.get('breadth_pct_20','-')}% | 200DMA: {breadth.get('breadth_pct_200','-')}%")
+    if fiidii:
+        fnet = fiidii.get("fii_net", 0); dnet = fiidii.get("dii_net", 0)
+        kpi(c1, "FII net (₹ Cr)", f"{fnet:+,.0f}",
+            f"Buy {fiidii.get('fii_buy',0):,.0f} | Sell {fiidii.get('fii_sell',0):,.0f}",
+            "g" if fnet > 0 else "r")
+        kpi(c2, "DII net (₹ Cr)", f"{dnet:+,.0f}",
+            f"Buy {fiidii.get('dii_buy',0):,.0f} | Sell {fiidii.get('dii_sell',0):,.0f}",
+            "g" if dnet > 0 else "r")
+    else:
+        kpi(c1, "FII net (₹ Cr)", "-", "NSE API blocked (7 PM ke baad try karo)")
+        kpi(c2, "DII net (₹ Cr)", "-", "NSE API blocked")
+
+    if breadth:
+        kpi(c3, "Nifty trend", breadth.get("nifty_trend", "-"),
+            f"Nifty proxy ₹{breadth.get('nifty_price','-')}")
+        kpi(c4, "Breadth (% >50DMA)", f"{breadth.get('breadth_pct_50','-')}%",
+            f"20DMA: {breadth.get('breadth_pct_20','-')}% | 200DMA: {breadth.get('breadth_pct_200','-')}%")
+    else:
+        kpi(c3, "Nifty trend", "-", "Breadth compute fail")
+        kpi(c4, "Breadth", "-", "Breadth compute fail")
 
 _warn = []
 if info.get("days", 0) < 40:
@@ -196,16 +272,15 @@ def render_detail(sym, k):
     kpi(c[1], "Accumulation score", f"{r.Score}/100", r.Signal, sc)
     kpi(c[2], "Buying status", r.Buying_Status, f"{r.Buy_Weeks}/4 weeks net buying", bc)
     kpi(c[3], "Delivered qty 1M÷3M", f"{r.Deliv_Qty_X:.2f}x", f"{r.Deliv_Qty_1M:,} vs {r.Deliv_Qty_3M:,}")
-    kpi(c[4], "Delivery % 1M vs prev 2M", f"{r.Deliv_Per_1M:.1f}%", f"was {r.Deliv_Per_3M:.1f}% ({r.Deliv_Per_Chg:+.1f}pp)")
+    kpi(c[4], "Delivery % 1M vs prev 2M", f"{r.Deliv_Per_1M:.1f}%", f"was {r.Deliv_Per_3M:.1f}% ({r.Deliv_Per_Chg:+.1f}%)")
     kpi(c[5], "Net buy flow 1M", f"{r.Net_Flow_1M:+.0f}%", f"prev 2M {r.Net_Flow_3M:+.0f}%",
         "g" if r.Net_Flow_1M > 0 else "r")
 
-    # DoD row
     c_dod = st.columns(4)
     dodq = r.get("Deliv_Qty_DoD", 0); dodp = r.get("Deliv_Per_DoD", 0); d3r = r.get("Deliv_3D_Ratio", 1.0)
     kpi(c_dod[0], "Deliv qty DoD", f"{dodq:+.0f}%", "Aaj vs kal",
         "g" if dodq > 50 else "r" if dodq < -30 else "")
-    kpi(c_dod[1], "Deliv % DoD", f"{dodp:+.2f} pp", "Aaj ka delivery % minus kal ka",
+    kpi(c_dod[1], "Deliv % DoD", f"{dodp:+.2f}%", "Aaj ka delivery % minus kal ka",
         "g" if dodp > 5 else "r" if dodp < -5 else "")
     kpi(c_dod[2], "Deliv 3D ÷ prev 3D", f"{d3r:.2f}x", "Short-term vs medium-term",
         "g" if d3r > 1.5 else "y" if d3r > 1.1 else "r" if d3r < 0.7 else "")
@@ -256,7 +331,7 @@ def render_detail(sym, k):
     elif r.Stage.startswith("Base"):
         why.append("Price abhi 20D low ke paas hai - move shuru hona baki ho sakta hai.")
     why.append(f"1 mahine me delivered qty pichle 2 mahine ke avg se {r.Deliv_Qty_X:.2f}x; "
-               f"delivery % {r.Deliv_Per_Chg:+.1f}pp.")
+               f"delivery % {r.Deliv_Per_Chg:+.1f}%.")
     why.append(f"<b>DoD:</b> Aaj delivery qty {dodq:+.0f}% vs kal | Delivery % change {dodp:+.2f}% | "
                f"3D ratio {d3r:.2f}x.")
     why.append(f"Net buy flow {r.Net_Flow_1M:+.0f}% (pichle 2M: {r.Net_Flow_3M:+.0f}%); "
@@ -303,17 +378,15 @@ def render_detail(sym, k):
     # -------- 14 days delivery data (15 rows fetch, 14 display for DoD) --------
     try:
         display_n = 14
-        fetch_n = display_n + 1  # 15 rows fetch
+        fetch_n = display_n + 1
         last_n = min(fetch_n, len(g))
         tbl = g.tail(last_n).copy()
 
-        # DoD compute karo RAW data pe (ascending order me), phir reverse
         tbl["Deliv_Qty"] = pd.to_numeric(tbl["DELIV_QTY"], errors="coerce").fillna(0).astype(int)
         tbl["Deliv_%"] = pd.to_numeric(tbl["DELIV_PER"], errors="coerce").round(2)
         tbl["DoD_Qty_%"] = (tbl["Deliv_Qty"].pct_change(1) * 100).round(1)
         tbl["DoD_Deliv_%"] = tbl["Deliv_%"].diff(1).round(2)
 
-        # Ab reverse karo (newest first)
         tbl = tbl.iloc[::-1].reset_index(drop=True)
         tbl["Date"] = pd.to_datetime(tbl["Date"]).dt.strftime("%a, %d %b %Y")
         tbl["Prev_Close"] = pd.to_numeric(tbl["PREV_CLOSE"], errors="coerce").round(2)
@@ -321,7 +394,6 @@ def render_detail(sym, k):
         tbl["Chg_%"] = ((tbl["Close"] / tbl["Prev_Close"] - 1) * 100).round(2)
         tbl["Total_Qty"] = pd.to_numeric(tbl["TTL_TRD_QNTY"], errors="coerce").fillna(0).astype(int)
 
-        # 14 rows display karo (purani 15th row ko drop karo — usne DoD ke liye kaam kiya)
         tbl = tbl.head(display_n).reset_index(drop=True)
 
         try:
@@ -348,13 +420,13 @@ def render_detail(sym, k):
                 "Total_Qty":  st.column_config.NumberColumn("Total Qty", format="%d"),
                 "Deliv_%":    st.column_config.NumberColumn("Deliv %", format="%.2f%%"),
                 "DoD_Deliv_%": st.column_config.NumberColumn("DoD Deliv %", format="%+.2f %",
-                                                            help="Kal se delivery % ka change (pp)."),
+                                                            help="Kal se delivery % ka change."),
             })
         st.caption(f"**Reference averages (previous 2M):**  "
                    f"Deliv Qty: **{int(dq_3m):,}**  |  Deliv %: **{dp_3m:.2f}%**  —  "
                    f"ye numbers NSE bhavcopy se direct aate hain, koi calculation nahi.")
     except Exception as ex:
-        st.warning(f"Last {display_n if 'display_n' in dir() else 14} days table error: {ex}")
+        st.warning(f"Last 14 days table error: {ex}")
 
     wf = E.weekly_flows(g, 12)
     fig2 = go.Figure(go.Bar(x=[d.strftime("%d %b") for d, _ in wf], y=[f for _, f in wf],
@@ -420,11 +492,10 @@ TABLE_CFG = {
     "Deliv_Qty_DoD": st.column_config.NumberColumn("Deliv qty DoD", format="%+.0f%%",
                                                    help="Aaj ki delivery qty vs kal. +100% = 2x jump."),
     "Deliv_Per_DoD": st.column_config.NumberColumn("Deliv % DoD", format="%+.2f %",
-                                                   help="Aaj ka delivery % minus kal ka (percentage points)."),
+                                                   help="Aaj ka delivery % minus kal ka."),
     "Deliv_3D_Ratio": st.column_config.NumberColumn("Deliv 3D÷prev 3D", format="%.2fx",
-                                                    help="Last 3 din ka avg delivery ÷ usse pehle 3 din ka avg. "
-                                                         ">1.5x = short-term surge."),
-    "Deliv_Per_Chg": st.column_config.NumberColumn("Deliv % Δ 1M−3M", format="%+.1f pp"),
+                                                    help="Last 3 din ka avg delivery ÷ usse pehle 3 din ka avg."),
+    "Deliv_Per_Chg": st.column_config.NumberColumn("Deliv % Δ 1M−3M", format="%+.1f %"),
     "Net_Flow_1M": st.column_config.NumberColumn("Net flow 1M", format="%+.0f%%"),
     "Deliv_Per_1M": st.column_config.NumberColumn("Deliv % 1M", format="%.1f%%"),
     "Deliv_Per_3M": st.column_config.NumberColumn("Deliv % prev 2M", format="%.1f%%"),
@@ -507,10 +578,10 @@ with tab1:
     if PRESETS[preset] is None:
         s1, s2 = p2.columns(2)
         min_x = s1.slider("Min delivery qty × (1M÷3M)", 0.5, 4.0, 1.2, 0.1)
-        min_pp = s2.slider("Min delivery % rise (pp)", -10, 30, 3)
+        min_pp = s2.slider("Min delivery % rise", -10, 30, 3)
     else:
         min_x, min_pp = PRESETS[preset]
-        p2.info(f"1M delivered qty ≥ **{min_x}x** | 1M delivery % ≥ **+{min_pp}pp**")
+        p2.info(f"1M delivered qty ≥ **{min_x}x** | 1M delivery % ≥ **+{min_pp}**")
 
     h1, h2, h3 = st.columns(3)
     only_acc = h1.checkbox("Sirf Accumulation / Strong", value=True)
@@ -719,7 +790,9 @@ with tab5:
 with tab6:
     st.markdown("### 🌊 Market Breadth + Nifty Trend")
     if not breadth:
-        st.warning("Breadth data compute nahi ho paya.")
+        st.error("Breadth data compute nahi ho paya. "
+                 "Ye engine.py me `market_breadth` function missing hone se ho sakta hai. "
+                 "Naya engine.py upload karo, ya refresh karo.")
     else:
         c1, c2, c3, c4 = st.columns(4)
         kpi(c1, "Nifty trend", breadth.get("nifty_trend","-"), "", "")
@@ -817,7 +890,7 @@ with tab7:
                 profit = shares * (tp - entry_px)
                 rr = (tp - entry_px) / per_share_risk if per_share_risk else 0
                 kpi(tc[i], f"{name} ₹{tp:.2f}", f"+₹{profit:,.0f}", f"R:R {rr:.1f}x", "g")
-        st.caption("⚠️ Ye ek calculator hai, recommendation nahi. Gap-down me SL se zyada loss ho sakta hai.")
+        st.caption("⚠️ Ye ek calculator hai, recommendation nahi.")
 
 # ---------------------------- Tab 8: Telegram ----------------------------- #
 with tab8:
@@ -844,15 +917,6 @@ with tab8:
         st.markdown("---")
         st.markdown("#### Preview (bhejne se pehle dekh lo)")
         st.code(A.format_telegram_alert(scr, deals, breadth, f"{asof:%d %b %Y}", top_n=top_n))
-
-        st.markdown("---")
-        st.markdown("#### 🔄 Auto daily alert (optional)")
-        st.markdown("""
-Streamlit Cloud free tier pe cron directly nahi chalta. Options:
-- **GitHub Actions** se daily 12:30 UTC (6 PM IST) pe trigger
-- **cron-job.org** (free) se daily Streamlit URL ping karo
-- Ya roz shaam **"Send alert now"** manually dabao
-        """)
 
 if open_sym:
     detail_dialog(open_sym)
