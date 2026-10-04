@@ -45,6 +45,12 @@ st.markdown("""
  background:#0f172a;white-space:pre-line;line-height:1.35}
 .st-key-kpis button p{font-size:.95rem;font-weight:600}
 .st-key-kpis button:hover{border-color:#22c55e}
+
+.primary-nav{background:#0b1220;border:1px solid #334155;border-radius:14px;padding:8px 10px;margin:0 0 16px 0;}
+.primary-nav-label{font-size:.72rem;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px 2px;}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:6px 0 12px;}
+.section-head h2{margin:0;font-size:1.45rem;}
+.badge{padding:4px 9px;border-radius:999px;background:#1e293b;border:1px solid #334155;color:#cbd5e1;font-size:.75rem;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -525,13 +531,16 @@ def stock_table(d, name, height=560):
     return None
 
 
-tab1, tab2, tab10, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "🔎 Screener", "🔄 Rotation", "📊 10D Bhavcopy", "🎯 Stock Plan", "⚖️ Compare",
-    "📜 Bulk/Block", "🌊 Market Breadth", "💰 Position Sizing", "🔔 Telegram",
-])
+st.markdown('<div class="primary-nav"><div class="primary-nav-label">Primary navigation</div></div>', unsafe_allow_html=True)
+page = st.radio(
+    "Primary navigation",
+    ["🔎 Screener", "🔄 Rotation", "📊 10D Bhavcopy", "🎯 Stock Plan", "⚖️ Compare",
+     "📜 Bulk/Block", "🌊 Market Breadth", "💰 Position Sizing", "🔔 Telegram"],
+    horizontal=True, label_visibility="collapsed", key="primary_nav"
+)
 open_sym = None
 
-with tab1:
+if page == "🔎 Screener":
     QUICK = {
         "strong": ("Strong acc.", pool[pool.Signal == "Strong Accumulation"]),
         "acc":    ("Accumulation", pool[pool.Signal == "Accumulation"]),
@@ -633,7 +642,9 @@ with tab1:
     open_sym = stock_table(d, "scr") or open_sym
     st.download_button("⬇️ CSV", d.to_csv(index=False).encode(), f"accumulation_{asof:%Y%m%d}.csv", "text/csv")
 
-with tab2:
+if page == "🔄 Rotation":
+    st.markdown('<div class="section-head"><h2>🔄 Sector Rotation</h2><span class="badge">Money Flow • Momentum • Accumulation</span></div>', unsafe_allow_html=True)
+    st.caption("Click a sector below to drill down. The detail view is restricted to the selected sector.")
     try:
         sec = E.sector_rotation(pool)
     except Exception as ex:
@@ -708,41 +719,63 @@ with tab2:
         if ev.selection.rows:
             chosen = sv.iloc[ev.selection.rows[0]].Sector
             sd = pool[pool.Sector == chosen].sort_values(["Score","Deliv_Qty_X"], ascending=False)
+            # Strip display icon if present and keep only selected sector.
+            chosen = str(chosen).replace("🟢 ","").replace("🔵 ","").replace("🟡 ","").replace("🔴 ","")
             st.markdown(f"#### {chosen} — {len(sd)} stocks")
+            # Sector drill-down: only selected sector appears below.
+            top_sector = sd.sort_values(["Score","Deliv_Qty_X"], ascending=False).head(8).Symbol.tolist()
+            if top_sector:
+                fig2=go.Figure()
+                for sym2 in top_sector:
+                    gs2=E.symbol_view(hist,sym2).tail(40)
+                    if not gs2.empty:
+                        base=float(gs2.CLOSE_PRICE.iloc[0])
+                        fig2.add_trace(go.Scatter(x=gs2.Date,y=gs2.CLOSE_PRICE/base*100,mode="lines",name=sym2))
+                fig2.update_layout(height=430,template="plotly_dark",hovermode="x unified",title=f"{chosen} — selected sector price view (rebased)",yaxis_title="Rebased price",margin=dict(l=10,r=10,t=50,b=10))
+                st.plotly_chart(fig2,width="stretch",key="selected_sector_price")
             open_sym = stock_table(sd, "sec", height=420) or open_sym
 
-with tab10:
-    st.markdown("### 📊 10 Days Bhavcopy — Sustained Activity Scanner")
+if page == "📊 10D Bhavcopy":
+    st.markdown('<div class="section-head"><h2>📊 10 Days Bhavcopy</h2><span class="badge">Sustained Activity Scanner</span></div>', unsafe_allow_html=True)
     st.caption("Last 10 NSE trading sessions. Default: price ≥ ₹100 and average turnover ≥ ₹10 Cr/day.")
     if bh10.empty:
         st.warning("10D bhavcopy data available nahi hai.")
     else:
+        st.info("Default filter sirf quality/liquidity protect karta hai: price ≥ ₹100 aur 10D average turnover ≥ ₹10 Cr. Numeric conditions optional hain.")
+        f10=bh10.copy()
         a,b,c,d=st.columns(4)
-        min_price=a.number_input("Min Price ₹",1.0,10000.0,100.0,10.0)
-        min_turn=b.number_input("Min avg turnover ₹Cr",0.0,1000.0,10.0,1.0)
-        min_active=c.number_input("Min active days",0,10,0,1)
-        min_score=d.number_input("Min activity score",0.0,100.0,0.0,5.0)
-        f10=bh10[(bh10.Price>=min_price)&(bh10.Turnover_10D_Cr>=min_turn)&(bh10.Active_Days>=min_active)&(bh10.Activity_Score>=min_score)].copy()
-        st.markdown("#### Numeric filters")
-        cols=st.columns(4); specs=[("10D Return %","Ret_10D",5.0),("Delivery %","Delivery_Pct",40.0),("Volume vs Avg","Vol_vs_Avg",1.5),("Turnover ₹Cr","Turnover_10D_Cr",10.0)]
+        min_price=a.number_input("Min Price ₹",1.0,100000.0,100.0,10.0,key="bh10_min_price")
+        min_turn=b.number_input("Min avg turnover ₹Cr",0.0,10000.0,10.0,1.0,key="bh10_min_turn")
+        min_active=c.number_input("Min active days",0,10,0,1,key="bh10_min_active")
+        min_score=d.number_input("Min activity score",0.0,100.0,0.0,5.0,key="bh10_min_score")
+        f10=f10[(f10.Price>=min_price)&(f10.Turnover_10D_Cr>=min_turn)&(f10.Active_Days>=min_active)&(f10.Activity_Score>=min_score)].copy()
+
+        st.markdown("#### 🔢 Numeric filters")
+        st.caption("Example: Return > 5, Delivery % > 40, Volume / Avg > 1.5x, Turnover > ₹10 Cr. Use only the filters you need.")
+        filter_cols=st.columns(4)
+        specs=[("10D Return %","Ret_10D",5.0),("Delivery %","Delivery_Pct",40.0),("Volume vs Avg","Vol_vs_Avg",1.5),("Turnover ₹Cr","Turnover_10D_Cr",10.0)]
+        active_filters=[]
         for i,(label,col,default) in enumerate(specs):
-            op=cols[i].selectbox(label+" operator",[">",">=","=","<=","<"],key="op10"+col)
-            val=cols[i].number_input(label+" value",value=default,key="val10"+col)
-            if op==">": m=f10[col]>val
-            elif op==">=": m=f10[col]>=val
-            elif op=="=": m=f10[col].between(val-1e-9,val+1e-9)
-            elif op=="<=": m=f10[col]<=val
-            else: m=f10[col]<val
-            f10=f10[m]
-        sec10=st.multiselect("Sector",sorted(bh10.Sector.dropna().unique()))
+            use=filter_cols[i].checkbox("Use",value=False,key="use10_"+col)
+            op=filter_cols[i].selectbox("Operator",[">",">=","=","<=","<"],index=0,key="op10_"+col)
+            val=filter_cols[i].number_input("Value",value=default,key="val10_"+col)
+            if use: active_filters.append((col,op,val))
+        if active_filters:
+            for col,op,val in active_filters:
+                if op==">": f10=f10[f10[col]>val]
+                elif op==">=": f10=f10[f10[col]>=val]
+                elif op=="=": f10=f10[np.isclose(f10[col],val,atol=1e-9)]
+                elif op=="<=": f10=f10[f10[col]<=val]
+                else: f10=f10[f10[col]<val]
+        sec10=st.multiselect("Sector",sorted(bh10.Sector.dropna().unique()),key="bh10_sector")
         if sec10: f10=f10[f10.Sector.isin(sec10)]
         st.success(f"{len(f10):,} stocks match")
         cfg={"Price":st.column_config.NumberColumn(format="₹%.2f"),"Ret_1D":st.column_config.NumberColumn("1D %",format="%+.2f%%"),"Ret_3D":st.column_config.NumberColumn("3D %",format="%+.2f%%"),"Ret_5D":st.column_config.NumberColumn("5D %",format="%+.2f%%"),"Ret_10D":st.column_config.NumberColumn("10D %",format="%+.2f%%"),"Vol_vs_Avg":st.column_config.NumberColumn("Vol / Avg",format="%.2fx"),"Delivery_Pct":st.column_config.NumberColumn("Delivery %",format="%.1f%%"),"Delivery_Trend":st.column_config.NumberColumn("Delivery trend pp",format="%+.1f"),"Turnover_10D_Cr":st.column_config.NumberColumn("Avg turnover",format="₹%.1f Cr"),"Activity_Score":st.column_config.ProgressColumn("Activity score",min_value=0,max_value=100,format="%.1f"),"Avg_Vol_10D":st.column_config.NumberColumn("10D avg volume",format="%.0f"),"Latest_Vol":st.column_config.NumberColumn("Latest volume",format="%.0f"),"Active_Days":st.column_config.NumberColumn("Active days",format="%d")}
         show=["Symbol","Sector","Price","Ret_1D","Ret_3D","Ret_5D","Ret_10D","Avg_Vol_10D","Latest_Vol","Vol_vs_Avg","Delivery_Pct","Delivery_Trend","Turnover_10D_Cr","Activity_Score","Positive_Days","Active_Days","Liquidity"]
         st.dataframe(f10[show],hide_index=True,width="stretch",height=650,column_config=cfg)
-        st.download_button("⬇️ Download 10D CSV",f10.to_csv(index=False).encode(),f"bhavcopy_10d_{asof:%Y%m%d}.csv","text/csv")
+        st.download_button("⬇️ Download 10D CSV",f10.to_csv(index=False).encode(),f"bhavcopy_10d_{asof:%Y%m%d}.csv","text/csv",key="download_10d")
 
-with tab3:
+if page == "🎯 Stock Plan":
     if NEW_LISTINGS:
         with st.expander(f"🆕 Recently listed ({len(NEW_LISTINGS)})", expanded=False):
             st.markdown(", ".join([f"`{s}`" for s in NEW_LISTINGS]))
@@ -750,7 +783,7 @@ with tab3:
     sym = st.selectbox("Stock (type karke search)", ALL_SYMS, index=idx)
     render_detail(sym, "tab")
 
-with tab4:
+if page == "⚖️ Compare":
     pick = st.multiselect("Select up to 4 stocks", ALL_SYMS,
                           default=[s for s in ["BAJAJHFL","BAJFINANCE"] if s in ALL_SYMS],
                           max_selections=4)
@@ -776,7 +809,7 @@ with tab4:
                           "Close_vs_Avg","Bulk_Flag","Bulk_Net_Cr"] if c in scr.columns]
         st.dataframe(scr[scr.Symbol.isin(pick)][cc], hide_index=True, width="stretch")
 
-with tab5:
+if page == "📜 Bulk/Block":
     if DEALS_STALE:
         st.warning(f"⚠️ Aaj ke bulk/block deals NSE pe abhi publish nahi hue. Last: {DEALS_DATE}")
     if deals is None or deals.empty:
@@ -801,7 +834,7 @@ with tab5:
                                     "Qty": st.column_config.NumberColumn(format="%d"),
                                     "Price": st.column_config.NumberColumn(format="₹%.2f")})
 
-with tab6:
+if page == "🌊 Market Breadth":
     st.markdown("### 🌊 Market Breadth + Nifty Trend")
     od=E.outcome_dashboard(hist)
     if not od.empty:
@@ -873,7 +906,7 @@ with tab6:
         else:
             st.info("Insider trading data aaj available nahi hai.")
 
-with tab7:
+if page == "💰 Position Sizing":
     st.markdown("### 💰 Position Sizing Calculator")
     st.caption("Capital + Risk % + Entry + SL → kitne shares kharido, max loss kitna.")
     c1, c2, c3 = st.columns(3)
@@ -931,7 +964,7 @@ with tab7:
                 kpi(tc[i], f"{name} ₹{tp:.2f}", f"+₹{profit:,.0f}", f"R:R {rr:.1f}x", "g")
         st.caption("⚠️ Ye ek calculator hai, recommendation nahi.")
 
-with tab8:
+if page == "🔔 Telegram":
     st.markdown("### 🔔 Telegram Alerts")
     st.caption("Do tarike: (1) GitHub Actions daily bhejega, (2) App me manual 'Send now'.")
     env_tok, env_chat = A.telegram_creds_from_env()
