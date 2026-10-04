@@ -1,0 +1,16 @@
+{
+  "asof": "2026-10-01",
+  "run_at_ist": "2026-10-04 13:36",
+  "stocks": 2746,
+  "accumulation": 716,
+  "fresh": 337,
+  "logged": 2746,
+  "info": {
+    "days": 63,
+    "errors": 0,
+    "delivery_cov": 90.0,
+    "dropped": 0
+  },
+  "deals_stale": false,
+  "telegram": "sent"
+}
