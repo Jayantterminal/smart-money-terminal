@@ -80,11 +80,11 @@ def load():
         except Exception: insider = pd.DataFrame()
         try: breadth = E.market_breadth(hist, scr, nifty_df)
         except Exception: breadth = {}
-        # re-entry: previous days' log only -> then log today's accumulation signals (once per load)
+        # Re-entry/outcomes are computed from the journal BEFORE today's rows
+        # are written. Writing is deliberately outside @st.cache_data.
         try:
             outcomes = E.signal_outcomes(hist)
             scr = E.reentry_stats(scr, asof, outcomes)
-            E.log_signals(scr, asof)
         except Exception:
             scr["Reentry"] = "🆕 First time"
             scr["Appearances_120D"] = 1
@@ -93,6 +93,15 @@ def load():
 
 
 hist, scr, info, fetched, deals, fiidii, insider, breadth, nifty_snap, outcomes, stats = load()
+
+# Cached functions must not perform file writes. Keep today's journal write
+# idempotent per Streamlit session/date.
+if not hist.empty and not scr.empty:
+    _journal_key = f"{pd.Timestamp(hist.Date.max()).date()}"
+    if st.session_state.get("_journal_written_for") != _journal_key:
+        E.log_signals(scr, pd.Timestamp(hist.Date.max()))
+        st.session_state["_journal_written_for"] = _journal_key
+
 if hist.empty or scr.empty:
     st.error("NSE data could not be loaded. NSE may be blocking this server. "
              f"Network errors: {info['errors']}. Refresh after a few minutes.")
@@ -144,7 +153,7 @@ with st.sidebar:
         """)
     env_tok, env_chat = A.telegram_creds_from_env()
     if env_tok and env_chat:
-        st.success("✅ GitHub Secrets me token mila")
+        st.success("✅ Telegram environment credentials found")
     tg_token = st.text_input("Bot Token", value=st.session_state.get("tg_token", ""), type="password")
     tg_chat  = st.text_input("Chat ID",   value=st.session_state.get("tg_chat", ""))
     if st.button("💾 Save token"):
@@ -152,7 +161,7 @@ with st.sidebar:
         st.session_state["tg_chat"]  = tg_chat
         st.success("Saved for this session.")
     st.caption("Source: NSE bhavcopy + bulk/block + FII/DII + Yahoo Nifty (EOD). "
-               "Analysis tool only, not investment advice.")
+               "Analysis tool only; signals are heuristic, not guaranteed trade outcomes.")
 
 st.markdown(f"""
 <div class="topbar">

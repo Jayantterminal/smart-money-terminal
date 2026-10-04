@@ -60,7 +60,7 @@ def fetch_bulk_block_deals() -> pd.DataFrame:
     for url, typ in (("https://nsearchives.nseindia.com/content/equities/bulk.csv", "Bulk"),
                      ("https://nsearchives.nseindia.com/content/equities/block.csv", "Block")):
         try:
-            r = requests.get(url, headers=_HEADERS, timeout=20)
+            r = _get_session().get(url, timeout=20)
             if r.status_code != 200 or len(r.text) < 50:
                 continue
             df = pd.read_csv(StringIO(r.text))
@@ -208,7 +208,7 @@ def fetch_fiidii():
 def fetch_insider_trades(days_back: int = 7) -> pd.DataFrame:
     cols = ["Date", "Symbol", "Person", "Category", "Buy_Sell", "Qty", "Value_Cr", "Mode"]
     try:
-        to_d = pd.Timestamp.today()
+        to_d = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
         url = ("https://www.nseindia.com/api/corporates-pit?index=equities"
                f"&from_date={(to_d - pd.Timedelta(days=days_back)):%d-%m-%Y}&to_date={to_d:%d-%m-%Y}")
         r = _get_session().get(url, timeout=20)
@@ -267,7 +267,7 @@ def send_telegram_message(token, chat_id, text):
             for attempt in range(2):
                 r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                                   data={"chat_id": str(chat_id), "text": chunk,
-                                        "parse_mode": "HTML", "disable_web_page_preview": True},
+                                        "disable_web_page_preview": True},
                                   timeout=15)
                 if r.status_code == 429 and attempt == 0:
                     try:

@@ -1,0 +1,86 @@
+SMART MONEY TERMINAL — V12 AUDIT
+====================================
+
+Scope
+-----
+Audited the uploaded project:
+- app.py
+- engine.py
+- market.py
+- alt_data.py
+- daily_job.py
+- requirements.txt
+- GitHub Actions workflow
+- Streamlit config
+- data journal files
+
+Validation
+----------
+- All five Python files compile successfully with Python's py_compile.
+- Synthetic outcome test passed for entry activation and conservative same-bar SL/target handling.
+
+Important findings in the original project
+-------------------------------------------
+1. requirements.txt did NOT include yfinance.
+   market.py imports yfinance dynamically, so Nifty/relative-strength data can silently disappear on
+   Streamlit deployments even though GitHub Actions installed yfinance separately.
+
+2. The cached Streamlit load() performed a file write through log_signals().
+   This is a side effect inside @st.cache_data. It can make the journal update timing depend on cache
+   state and is difficult to reason about.
+
+3. signals_log.csv in the uploaded project contains 1,252 rows for 2026-10-01, including Neutral,
+   Distribution, and Low volume rows. That conflicts with the current engine.py contract, which says
+   only Accumulation/Strong Accumulation should be logged. The uploaded last_run.json also reports
+   363 accumulation signals but "logged": 1252. This is an internal consistency problem.
+
+4. signal_outcomes() in the original code treated a future SL/target touch as a hit without first
+   requiring that the planned Entry had actually traded. That can create false backtest outcomes.
+   It also could mark both SL and targets on the same daily bar because daily OHLC cannot establish
+   intraday order.
+
+5. Avg_Turnover_Cr was estimated from traded quantity × close. When NSE's reported turnover exists,
+   using that reported value is more accurate for the liquidity filter.
+
+6. GitHub Actions installed dependencies twice and ran daily_job.py with --force. A retry/manual
+   workflow could therefore intentionally resend the same date's Telegram alert. The workflow was
+   changed to the idempotent default run; --force remains available in daily_job.py for deliberate
+   resend.
+
+7. Bulk/block requests used a separate requests.get() instead of the warmed NSE session. This can
+   make NSE anti-bot/session behavior less reliable. The revised version uses the existing session.
+
+8. Insider date calculation used the host's naive current timestamp. The revised version uses
+   Asia/Kolkata time explicitly.
+
+9. Telegram messages were sent with HTML parse mode while the chunker could split a message in the
+   middle of an HTML tag. The revised version sends the already-human-readable alert without parse
+   mode, making chunking robust.
+
+V12 changes
+-----------
+- Added yfinance to requirements.txt.
+- Added version bounds to core dependencies.
+- Added .gitignore for cache/secrets/log/database artifacts.
+- Made cached Streamlit data loading side-effect free.
+- Made journal writes idempotent per session/date.
+- Normalized/filter legacy signal-log rows to accumulation-only.
+- Reworked outcome tracking to require a future Entry trigger.
+- Conservative daily-bar event ordering: SL wins if SL and target are both touched in one bar.
+- Prefer NSE reported turnover when available.
+- Reuse NSE session for bulk/block requests.
+- Use Asia/Kolkata date for insider data.
+- Removed Telegram HTML parse mode to avoid malformed chunks.
+- Removed duplicate pip installs in GitHub Actions.
+- Removed automatic --force from scheduled workflow.
+- Updated README with setup and safety notes.
+
+Remaining limitations
+---------------------
+- NSE web endpoints can change or block automated requests; this code has fallbacks but cannot
+  guarantee availability.
+- Daily OHLC data cannot reveal the true intraday order when both entry/SL/target levels are crossed.
+  V12 intentionally uses conservative rules.
+- Sector mapping based on the Nifty 500 list does not cover every NSE symbol, so some sectors remain
+  Unknown.
+- The score is a heuristic research score, not a statistically validated prediction model.

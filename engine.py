@@ -356,7 +356,15 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         except Exception:
             buy_weeks = 0
 
-        turnover_cr = float((v[-min(21, n):] * c[-min(21, n):]).sum() / 1e7 / min(21, n))
+        # Prefer NSE's reported turnover when available. qty × close is only an
+        # approximation and can misclassify liquidity when the average traded price
+        # differs materially from the close.
+        _turn_n = min(21, n)
+        if "TURNOVER_LACS" in g.columns:
+            _turn = pd.to_numeric(g["TURNOVER_LACS"], errors="coerce").tail(_turn_n)
+            turnover_cr = float(_turn.mean() / 100.0) if _turn.notna().any() else 0.0
+        else:
+            turnover_cr = float((v[-_turn_n:] * c[-_turn_n:]).sum() / 1e7 / max(1, _turn_n))
 
         lb_start = max(0, n - 30); lb_end = max(lb_start, n - 2)
         if lb_end - lb_start >= 5:
@@ -749,12 +757,29 @@ def market_breadth(hist, scr, nifty=None):
 
 # ============ SIGNAL LOG ============ #
 def load_signal_log():
+    """Load the signal journal and normalize legacy rows.
+
+    Older project versions wrote every scanned stock to signals_log.csv.
+    The current journal is intentionally accumulation-only, so legacy rows are
+    filtered out here instead of contaminating re-entry/outcome statistics.
+    """
     if not os.path.exists(SIGNALS_CSV):
         return pd.DataFrame()
     try:
         df = pd.read_csv(SIGNALS_CSV)
-        if "run_date" in df.columns:
-            df["run_date"] = pd.to_datetime(df["run_date"], errors="coerce")
+        required = {"run_date", "symbol", "signal", "score", "price", "entry", "sl", "t1", "t2", "t3"}
+        if not required.issubset(df.columns):
+            return pd.DataFrame()
+        df["run_date"] = pd.to_datetime(df["run_date"], errors="coerce").dt.normalize()
+        df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+        df["signal"] = df["signal"].astype(str).str.strip()
+        # Only current accumulation signals belong in this journal.
+        df = df[df["signal"].isin(ACC_SIGNALS)].copy()
+        df = df.dropna(subset=["run_date", "symbol"])
+        # One symbol/day is the canonical record.
+        df = df.sort_values(["run_date", "symbol"]).drop_duplicates(
+            subset=["run_date", "symbol"], keep="last"
+        ).reset_index(drop=True)
         return df
     except Exception:
         return pd.DataFrame()
@@ -784,8 +809,11 @@ def log_signals(scr, asof):
         new_df = pd.DataFrame(rows, columns=["run_date", "symbol", "signal", "score", "price",
                                              "entry", "sl", "t1", "t2", "t3"])
         if os.path.exists(SIGNALS_CSV):
-            old = pd.read_csv(SIGNALS_CSV)
-            old = old[old["run_date"].astype(str) != rd]
+            # Use the normalized loader so legacy "all stocks" journal rows
+            # cannot survive into the new accumulation-only journal.
+            old = load_signal_log().copy()
+            if not old.empty:
+                old = old[old["run_date"].astype(str).str[:10] != rd]
             combined = pd.concat([old, new_df], ignore_index=True)
         else:
             combined = new_df
@@ -802,42 +830,86 @@ def log_signals(scr, asof):
 
 
 def signal_outcomes(hist):
+    """Evaluate logged signals without look-ahead.
+
+    Rules:
+      * The signal-day close is not treated as an automatic entry.
+      * Entry becomes active only when a later daily bar trades through Entry.
+      * After entry, the first SL/T1/T2/T3 event is recorded.
+      * If a daily bar touches both SL and a target, SL wins (conservative;
+        daily OHLC cannot reveal the intraday order).
+    """
     log = load_signal_log()
     if log.empty or hist is None or hist.empty:
         return pd.DataFrame()
+
     h = hist.copy()
-    h["Date"] = pd.to_datetime(h["Date"], errors="coerce")
+    h["Date"] = pd.to_datetime(h["Date"], errors="coerce").dt.normalize()
     h = h.dropna(subset=["Date", "Symbol", "LOW_PRICE", "HIGH_PRICE"])
+    h["Symbol"] = h["Symbol"].astype(str).str.strip().str.upper()
     grouped = {sym: g.sort_values("Date") for sym, g in h.groupby("Symbol")}
-    out_rows = []
+
+    rows = []
     for _, r in log.iterrows():
         try:
-            sym = str(r["symbol"])
-            rd = pd.to_datetime(r["run_date"])
+            sym = str(r["symbol"]).strip().upper()
+            rd = pd.Timestamp(r["run_date"]).normalize()
+            entry = float(r.get("entry", 0) or 0)
             sl = float(r.get("sl", 0) or 0)
             t1 = float(r.get("t1", 0) or 0)
             t2 = float(r.get("t2", 0) or 0)
             t3 = float(r.get("t3", 0) or 0)
             g = grouped.get(sym)
-            if g is None or rd is None or pd.isna(rd):
+            if g is None or entry <= 0 or sl <= 0:
                 continue
-            after = g[g.Date > rd]
-            if after.empty:
-                out_rows.append({"run_date": rd, "symbol": sym,
-                                 "hit_sl": 0, "hit_t1": 0, "hit_t2": 0, "hit_t3": 0,
-                                 "days_tracked": 0})
-                continue
-            out_rows.append({
-                "run_date": rd, "symbol": sym,
-                "hit_sl": int((after.LOW_PRICE <= sl).any()) if sl > 0 else 0,
-                "hit_t1": int((after.HIGH_PRICE >= t1).any()) if t1 > 0 else 0,
-                "hit_t2": int((after.HIGH_PRICE >= t2).any()) if t2 > 0 else 0,
-                "hit_t3": int((after.HIGH_PRICE >= t3).any()) if t3 > 0 else 0,
-                "days_tracked": len(after),
+
+            future = g[g.Date > rd].copy()
+            entry_date = None
+            exit_date = None
+            exit_event = None
+            days_tracked = len(future)
+
+            for _, bar in future.iterrows():
+                lo = float(bar.LOW_PRICE)
+                hi = float(bar.HIGH_PRICE)
+                d = pd.Timestamp(bar.Date).normalize()
+
+                # Entry trigger: later session must actually trade through entry.
+                if entry_date is None:
+                    if lo <= entry <= hi:
+                        entry_date = d
+                    continue
+
+                # Conservative daily-bar ordering: SL wins if both sides were touched.
+                if lo <= sl:
+                    exit_date, exit_event = d, "SL"
+                    break
+                if t1 > 0 and hi >= t1:
+                    exit_date, exit_event = d, "T1"
+                    break
+                if t2 > 0 and hi >= t2:
+                    exit_date, exit_event = d, "T2"
+                    break
+                if t3 > 0 and hi >= t3:
+                    exit_date, exit_event = d, "T3"
+                    break
+
+            rows.append({
+                "run_date": rd,
+                "symbol": sym,
+                "entry_triggered": int(entry_date is not None),
+                "entry_date": entry_date,
+                "exit_event": exit_event or "",
+                "exit_date": exit_date,
+                "hit_sl": int(exit_event == "SL"),
+                "hit_t1": int(exit_event == "T1"),
+                "hit_t2": int(exit_event == "T2"),
+                "hit_t3": int(exit_event == "T3"),
+                "days_tracked": days_tracked,
             })
         except Exception:
             continue
-    return pd.DataFrame(out_rows)
+    return pd.DataFrame(rows)
 
 
 def _episodes(dates, gap_days):
