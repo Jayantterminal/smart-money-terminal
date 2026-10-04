@@ -86,6 +86,10 @@ except Exception:
     scr["Days_Since_First"] = 0
 
 ALL_SYMS = sorted(scr.Symbol.tolist())
+if "Is_New_Listing" in scr.columns:
+    NEW_LISTINGS = sorted(scr[scr.Is_New_Listing].Symbol.tolist())
+else:
+    NEW_LISTINGS = []
 
 STAGES = ["Base (not moved)", "Early move", "Rally on", "Extended (already ran)"]
 SETUPS = ["In range (base)", "Breakout", "Trending / wide", "Breakdown"]
@@ -157,6 +161,13 @@ def render_detail(sym: str, k: str):
     r = scr[scr.Symbol == sym].iloc[0]
     g = E.symbol_view(hist, sym).tail(80)
     st.markdown(f"### {sym}  <span style='color:#94a3b8;font-size:.9rem'>{r.Sector}</span>", unsafe_allow_html=True)
+    if r.get("Is_New_Listing", False):
+        st.warning(
+            f"🆕 **Recently listed stock** — sirf {len(g)} sessions ka data hai. "
+            "1M vs 3M comparison weak hai (3M avg me ~kam sessions aaye hain). "
+            "**Delivery %, bulk/block deals, aur price action pe focus karo.** "
+            "Ye stock 20+ sessions ke baad full metrics ke saath screener me aayega."
+        )
 
     sc = "g" if r.Score >= 55 else "y" if r.Score >= 35 else "r"
     bc = {"Continuing": "g", "Just started": "g", "Fading": "y", "Not buying": "r"}[r.Buying_Status]
@@ -280,14 +291,14 @@ def detail_dialog(sym: str):
     render_detail(sym, "dlg")
 
 
-TABLE_COLS = ["Symbol", "Reentry", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3",
+TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3",
               "Score", "Signal", "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage",
               "Deliv_Qty_X", "Today_X", "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M",
               "Acc_Days", "Range_Pct", "Chg_Pct", "RS_1M", "Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr",
               "Bulk_Flag", "Bulk_Net_Cr", "Deals_Today", "Appearances_120D", "Days_Since_First", "Sector"]
 TABLE_CFG = {
     "Symbol": st.column_config.TextColumn("Symbol", pinned=True),
-    "Reentry": st.column_config.TextColumn("Re-entry", help="Past 120 days ke screener history se."),
+    "Reentry": st.column_config.TextColumn("Re-entry", help="Past 120 days ke screener history se."),     "Is_New_Listing": st.column_config.CheckboxColumn("🆕 New", help="Recently listed — 20 sessions se kam data. 1M vs 3M comparison weak hai."),
     "Price": st.column_config.NumberColumn("Price", format="₹%.2f"),
     "Entry_Zone": st.column_config.TextColumn("Entry zone (₹)"),
     "Entry_Status": st.column_config.TextColumn("Price vs zone"),
@@ -624,6 +635,12 @@ with tab2:
 
 # ---------------------------- Stock plan ---------------------------------- #
 with tab3:
+    if NEW_LISTINGS:
+        with st.expander(f"🆕 Recently listed stocks ({len(NEW_LISTINGS)}) — 20 sessions se kam data", expanded=False):
+            st.caption("In stocks pe 1M vs 3M comparison meaningful nahi hai (bahut kam data). "
+                       "Fir bhi daily delivery %, net flow, bulk deals dekh sakte ho. "
+                       "Search box me type karke inko bhi select kar sakte ho.")
+            st.markdown(", ".join([f"`{s}`" for s in NEW_LISTINGS]))
     idx = ALL_SYMS.index("BAJAJHFL") if "BAJAJHFL" in ALL_SYMS else 0
     sym = st.selectbox("Stock (type karke search)", ALL_SYMS, index=idx)
     render_detail(sym, "tab")
