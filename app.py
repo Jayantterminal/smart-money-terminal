@@ -1,8 +1,8 @@
 """
-app.py - Smart Money Terminal (v4)
-All features: screener, sector rotation, stock plan, compare, bulk/block,
-re-entry tracker, market breadth, FII/DII, insider trades, position sizing, Telegram,
-last 5 days delivery verification table.
+app.py - Smart Money Terminal (v5)
+Full: screener, sector rotation, stock plan, compare, bulk/block,
+re-entry tracker, market breadth, FII/DII, insider trades, position sizing,
+Telegram alerts, DoD delivery metrics, last 5 days verify table.
 """
 import hashlib
 from datetime import datetime
@@ -120,11 +120,11 @@ with st.sidebar:
     with st.expander("Setup (ek baar karo)", expanded=False):
         st.markdown("""
 **1.** Telegram pe **@BotFather** ko message karo → `/newbot` → naam do
-**2.** Bot token milega (jaise `1234:ABC...`) → neeche paste karo
+**2.** Bot token milega → neeche paste karo
 **3.** Apne bot ko **@userinfobot** se apna chat_id milega → neeche paste karo
 **4.** "Save token" dabao
 
-**Daily 6:30 PM auto-alert ke liye** GitHub Actions setup chahiye (optional). Abhi "Send now" button se manual alert ja sakta hai.
+**Daily 6:30 PM auto-alert ke liye** GitHub Actions setup chahiye (optional).
         """)
     tg_token = st.text_input("Bot Token", value=st.session_state.get("tg_token", ""), type="password")
     tg_chat  = st.text_input("Chat ID",   value=st.session_state.get("tg_chat", ""))
@@ -132,12 +132,9 @@ with st.sidebar:
         st.session_state["tg_token"] = tg_token
         st.session_state["tg_chat"]  = tg_chat
         st.success("Saved for this session.")
-    st.caption("Token sirf is session me yaad rehta hai. Multi-device chahiye to Streamlit Cloud → Secrets me daalo.")
-
     st.caption("Source: NSE bhavcopy + bulk/block + FII/DII (EOD, ~6-7 PM IST). "
                "Analysis tool only, not investment advice.")
 
-# ---- topbar ---- #
 st.markdown(f"""
 <div class="topbar">
  <div class="brand">SMART<span>MONEY</span> TERMINAL</div>
@@ -148,7 +145,6 @@ st.markdown(f"""
 if info["errors"]:
     st.warning(f"{info['errors']} din ka NSE data download nahi ho paya - Refresh karke dekho.")
 
-# ---- FII/DII strip ---- #
 if fiidii:
     c1, c2, c3, c4 = st.columns(4)
     fnet = fiidii.get("fii_net", 0); dnet = fiidii.get("dii_net", 0)
@@ -204,6 +200,17 @@ def render_detail(sym, k):
     kpi(c[5], "Net buy flow 1M", f"{r.Net_Flow_1M:+.0f}%", f"prev 2M {r.Net_Flow_3M:+.0f}%",
         "g" if r.Net_Flow_1M > 0 else "r")
 
+    # DoD row
+    c_dod = st.columns(4)
+    dodq = r.get("Deliv_Qty_DoD", 0); dodp = r.get("Deliv_Per_DoD", 0); d3r = r.get("Deliv_3D_Ratio", 1.0)
+    kpi(c_dod[0], "Deliv qty DoD", f"{dodq:+.0f}%", "Aaj vs kal",
+        "g" if dodq > 50 else "r" if dodq < -30 else "")
+    kpi(c_dod[1], "Deliv % DoD", f"{dodp:+.2f} pp", "Aaj ka delivery % minus kal ka",
+        "g" if dodp > 5 else "r" if dodp < -5 else "")
+    kpi(c_dod[2], "Deliv 3D ÷ prev 3D", f"{d3r:.2f}x", "Short-term vs medium-term",
+        "g" if d3r > 1.5 else "y" if d3r > 1.1 else "r" if d3r < 0.7 else "")
+    kpi(c_dod[3], "Fresh activity", FICON.get(r.Fresh, "-"), "Spike detection", "")
+
     c2 = st.columns(4)
     rs = r.get("RS_1M", np.nan)
     rs_cls = "g" if pd.notna(rs) and rs > 0 else "r"
@@ -220,7 +227,6 @@ def render_detail(sym, k):
         f"Appeared {int(r.get('Appearances_120D', 1))}x in last 120D",
         "y" if "SL" in str(rflag) else "")
 
-    # Turnover + Trades row
     c3 = st.columns(4)
     to1 = r.get("Turnover_1M_Cr", 0); tox = r.get("Turnover_X", 0)
     tr1 = r.get("Trades_1M_Avg", 0); tpc = r.get("Trades_per_Cr", 0)
@@ -251,6 +257,8 @@ def render_detail(sym, k):
         why.append("Price abhi 20D low ke paas hai - move shuru hona baki ho sakta hai.")
     why.append(f"1 mahine me delivered qty pichle 2 mahine ke avg se {r.Deliv_Qty_X:.2f}x; "
                f"delivery % {r.Deliv_Per_Chg:+.1f}pp.")
+    why.append(f"<b>DoD:</b> Aaj delivery qty {dodq:+.0f}% vs kal | Delivery % change {dodp:+.2f}pp | "
+               f"3D ratio {d3r:.2f}x.")
     why.append(f"Net buy flow {r.Net_Flow_1M:+.0f}% (pichle 2M: {r.Net_Flow_3M:+.0f}%); "
                f"{r.Acc_Days} accumulation din vs {r.Dist_Days} distribution din (last 21).")
     if tox:
@@ -292,7 +300,6 @@ def render_detail(sym, k):
                       margin=dict(l=10, r=70, t=30, b=10))
     st.plotly_chart(fig, width="stretch", key=f"{k}_price")
 
-    # -------- Last 5 days delivery data (verify) --------
     try:
         last_n = min(5, len(g))
         tbl = g.tail(last_n).copy()
@@ -304,6 +311,9 @@ def render_detail(sym, k):
         tbl["Deliv_Qty"] = pd.to_numeric(tbl["DELIV_QTY"], errors="coerce").fillna(0).astype(int)
         tbl["Total_Qty"] = pd.to_numeric(tbl["TTL_TRD_QNTY"], errors="coerce").fillna(0).astype(int)
         tbl["Deliv_%"] = pd.to_numeric(tbl["DELIV_PER"], errors="coerce").round(2)
+        # DoD: compare each row to row BELOW (since we reversed to newest first)
+        tbl["DoD_Qty_%"] = (tbl["Deliv_Qty"].pct_change(-1) * 100).round(1)
+        tbl["DoD_Deliv_%"] = tbl["Deliv_%"].diff(-1).round(2)
 
         try:
             dp_3m = float(pd.to_numeric(g["DELIV_PER"], errors="coerce").tail(63).head(42).mean())
@@ -315,7 +325,8 @@ def render_detail(sym, k):
             dq_3m = 0.0
 
         st.markdown("#### 📋 Last 5 days delivery data (verify)")
-        show_cols = ["Date", "Prev_Close", "Close", "Chg_%", "Deliv_Qty", "Total_Qty", "Deliv_%"]
+        show_cols = ["Date", "Prev_Close", "Close", "Chg_%", "Deliv_Qty", "DoD_Qty_%",
+                     "Total_Qty", "Deliv_%", "DoD_Deliv_%"]
         st.dataframe(
             tbl[show_cols], hide_index=True, width="stretch",
             column_config={
@@ -323,8 +334,12 @@ def render_detail(sym, k):
                 "Close":      st.column_config.NumberColumn("Close", format="₹%.2f"),
                 "Chg_%":      st.column_config.NumberColumn("Chg %", format="%+.2f%%"),
                 "Deliv_Qty":  st.column_config.NumberColumn("Deliv Qty", format="%d"),
+                "DoD_Qty_%":  st.column_config.NumberColumn("DoD Qty %", format="%+.1f%%",
+                                                            help="Kal se compare karke delivery qty kitni badhi."),
                 "Total_Qty":  st.column_config.NumberColumn("Total Qty", format="%d"),
                 "Deliv_%":    st.column_config.NumberColumn("Deliv %", format="%.2f%%"),
+                "DoD_Deliv_%": st.column_config.NumberColumn("DoD Deliv %", format="%+.2f pp",
+                                                            help="Kal se delivery % ka change (pp me)."),
             })
         st.caption(f"**Reference averages (previous 2M):**  "
                    f"Deliv Qty: **{int(dq_3m):,}**  |  Deliv %: **{dp_3m:.2f}%**  —  "
@@ -371,7 +386,8 @@ def detail_dialog(sym):
 
 TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3",
               "Score", "Signal", "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage",
-              "Deliv_Qty_X", "Today_X", "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M",
+              "Deliv_Qty_X", "Today_X", "Deliv_Qty_DoD", "Deliv_Per_DoD", "Deliv_3D_Ratio",
+              "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M",
               "Acc_Days", "Range_Pct", "Chg_Pct", "RS_1M", "Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr",
               "Turnover_1M_Cr", "Turnover_X", "Trades_1M_Avg", "Trades_per_Cr", "Close_vs_Avg",
               "Bulk_Flag", "Bulk_Net_Cr", "Deals_Today", "Appearances_120D", "Days_Since_First", "Sector"]
@@ -392,7 +408,14 @@ TABLE_CFG = {
     "Buy_Weeks": st.column_config.NumberColumn("Buy weeks /4", format="%d"),
     "Deliv_Qty_X": st.column_config.NumberColumn("Deliv qty 1M÷3M", format="%.2fx"),
     "Today_X": st.column_config.NumberColumn("Today ÷ 3M avg", format="%.2fx"),
-    "Deliv_Per_Chg": st.column_config.NumberColumn("Deliv % Δ", format="%+.1f pp"),
+    "Deliv_Qty_DoD": st.column_config.NumberColumn("Deliv qty DoD", format="%+.0f%%",
+                                                   help="Aaj ki delivery qty vs kal. +100% = 2x jump."),
+    "Deliv_Per_DoD": st.column_config.NumberColumn("Deliv % DoD", format="%+.2f pp",
+                                                   help="Aaj ka delivery % minus kal ka (percentage points)."),
+    "Deliv_3D_Ratio": st.column_config.NumberColumn("Deliv 3D÷prev 3D", format="%.2fx",
+                                                    help="Last 3 din ka avg delivery ÷ usse pehle 3 din ka avg. "
+                                                         ">1.5x = short-term surge."),
+    "Deliv_Per_Chg": st.column_config.NumberColumn("Deliv % Δ 1M−3M", format="%+.1f pp"),
     "Net_Flow_1M": st.column_config.NumberColumn("Net flow 1M", format="%+.0f%%"),
     "Deliv_Per_1M": st.column_config.NumberColumn("Deliv % 1M", format="%.1f%%"),
     "Deliv_Per_3M": st.column_config.NumberColumn("Deliv % prev 2M", format="%.1f%%"),
@@ -402,18 +425,11 @@ TABLE_CFG = {
     "RS_1M": st.column_config.NumberColumn("RS vs Nifty 1M", format="%+.1f%%"),
     "Deliv_Val_1M_Cr": st.column_config.NumberColumn("Deliv val 1M", format="₹%.1f Cr"),
     "Deliv_Val_3M_Cr": st.column_config.NumberColumn("Deliv val prev 2M", format="₹%.1f Cr"),
-    "Turnover_1M_Cr": st.column_config.NumberColumn("Turnover 1M", format="₹%.1f Cr",
-                                                    help="Last 1 mahine ka total turnover (₹ Cr me). NSE official data."),
-    "Turnover_X": st.column_config.NumberColumn("Turnover 1M÷3M", format="%.2fx",
-                                                help="1M avg daily turnover ÷ prev 2M avg. Paisa flow badh raha?"),
-    "Trades_1M_Avg": st.column_config.NumberColumn("Trades/day (1M)", format="%d",
-                                                   help="Roz kitne trades. Bahut zyada = retail frenzy, kam = institutional."),
-    "Trades_per_Cr": st.column_config.NumberColumn("Trades/₹Cr", format="%.1f",
-                                                   help="Kam value = big players (few trades, high value). "
-                                                        "Zyada = retail (many small trades)."),
-    "Close_vs_Avg": st.column_config.NumberColumn("Close vs Avg %", format="%+.2f%%",
-                                                  help="Positive = buyers ne end me kharida (bullish). "
-                                                       "Negative = sellers aggressive (bearish)."),
+    "Turnover_1M_Cr": st.column_config.NumberColumn("Turnover 1M", format="₹%.1f Cr"),
+    "Turnover_X": st.column_config.NumberColumn("Turnover 1M÷3M", format="%.2fx"),
+    "Trades_1M_Avg": st.column_config.NumberColumn("Trades/day (1M)", format="%d"),
+    "Trades_per_Cr": st.column_config.NumberColumn("Trades/₹Cr", format="%.1f"),
+    "Close_vs_Avg": st.column_config.NumberColumn("Close vs Avg %", format="%+.2f%%"),
     "Bulk_Flag": st.column_config.TextColumn("Bulk/Block today"),
     "Bulk_Net_Cr": st.column_config.NumberColumn("Bulk net", format="₹%+.2f Cr"),
     "Deals_Today": st.column_config.NumberColumn("Deals today", format="%d"),
@@ -660,7 +676,8 @@ with tab4:
                           margin=dict(l=10,r=10,t=30,b=10))
         st.plotly_chart(fig, width="stretch", key="cmp_chart")
         cc = [c for c in ["Symbol","Reentry","Price","Entry_Zone","SL","T1","T2","T3","Score","Signal",
-                          "Buying_Status","Buy_Weeks","Setup","Stage","Deliv_Qty_X","Deliv_Per_Chg",
+                          "Buying_Status","Buy_Weeks","Setup","Stage","Deliv_Qty_X","Deliv_Qty_DoD",
+                          "Deliv_Per_DoD","Deliv_3D_Ratio","Deliv_Per_Chg",
                           "Net_Flow_1M","RS_1M","Turnover_1M_Cr","Turnover_X","Trades_per_Cr",
                           "Close_vs_Avg","Bulk_Flag","Bulk_Net_Cr"] if c in scr.columns]
         st.dataframe(scr[scr.Symbol.isin(pick)][cc], hide_index=True, width="stretch")
@@ -707,13 +724,13 @@ with tab6:
         st.markdown("#### Sentiment interpretation")
         pct50 = breadth.get("breadth_pct_50", 0)
         if pct50 >= 70:
-            st.success("🟢 **Strong bullish market** — 70%+ stocks above 50DMA. Risk-on. Accumulation picks me confidence zyada.")
+            st.success("🟢 **Strong bullish market** — 70%+ stocks above 50DMA. Risk-on.")
         elif pct50 >= 50:
-            st.info("🟡 **Neutral to mildly bullish** — Selective stock picking. Sector rotation ka dhyan rakho.")
+            st.info("🟡 **Neutral to mildly bullish** — Selective stock picking.")
         elif pct50 >= 30:
             st.warning("🟡 **Cautious** — 30-50% stocks above 50DMA. Position size chhota rakho.")
         else:
-            st.error("🔴 **Bearish market** — 70%+ stocks 50DMA ke neeche. Cash me rehna better. Accumulation picks bhi risky.")
+            st.error("🔴 **Bearish market** — 70%+ stocks 50DMA ke neeche. Cash me rehna better.")
 
         adv = breadth.get("advances",0); dec = breadth.get("declines",0)
         st.markdown(f"**Today:** Advances: {adv}  |  Declines: {dec}  |  A/D ratio: {breadth.get('ad_ratio',0)}%")
@@ -725,8 +742,7 @@ with tab6:
         if insider is not None and not insider.empty:
             st.markdown("---")
             st.markdown("### 🕵️ Insider / Promoter Trades (last 7 days)")
-            st.caption("Promoter ya director ne khud kharida = strong bullish signal. "
-                       "Ye NSE public disclosure hai. Kabhi NSE load nahi hota to blank aayega.")
+            st.caption("Promoter ya director ne khud kharida = strong bullish signal.")
             filt = insider.copy()
             filt["Buy_Sell"] = filt["Buy_Sell"].astype(str).str.upper()
             f1, f2 = st.columns(2)
@@ -738,8 +754,7 @@ with tab6:
                          column_config={"Value_Cr": st.column_config.NumberColumn(format="₹%.2f Cr"),
                                         "Qty": st.column_config.NumberColumn(format="%d")})
         else:
-            st.info("Insider trading data aaj available nahi hai (NSE API slow/block). "
-                    "Kal try karo.")
+            st.info("Insider trading data aaj available nahi hai (NSE API slow/block). Kal try karo.")
 
 # ---------------------------- Tab 7: Position Sizing ---------------------- #
 with tab7:
@@ -793,8 +808,7 @@ with tab7:
                 profit = shares * (tp - entry_px)
                 rr = (tp - entry_px) / per_share_risk if per_share_risk else 0
                 kpi(tc[i], f"{name} ₹{tp:.2f}", f"+₹{profit:,.0f}", f"R:R {rr:.1f}x", "g")
-        st.caption("⚠️ Ye ek calculator hai, recommendation nahi. Actual SL hit hone pe hi loss hoga — "
-                   "aur gap-down me SL se zyada loss bhi ho sakta hai.")
+        st.caption("⚠️ Ye ek calculator hai, recommendation nahi. Gap-down me SL se zyada loss ho sakta hai.")
 
 # ---------------------------- Tab 8: Telegram ----------------------------- #
 with tab8:
@@ -829,8 +843,6 @@ Streamlit Cloud free tier pe cron directly nahi chalta. Options:
 - **GitHub Actions** se daily 12:30 UTC (6 PM IST) pe trigger
 - **cron-job.org** (free) se daily Streamlit URL ping karo
 - Ya roz shaam **"Send alert now"** manually dabao
-
-Batana — auto setup chahiye to GitHub Actions workflow file likh dunga.
         """)
 
 if open_sym:
