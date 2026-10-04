@@ -1,8 +1,8 @@
 """
-app.py - Smart Money Terminal (v5)
+app.py - Smart Money Terminal (v6)
 Full: screener, sector rotation, stock plan, compare, bulk/block,
 re-entry tracker, market breadth, FII/DII, insider trades, position sizing,
-Telegram alerts, DoD delivery metrics, last 5 days verify table.
+Telegram alerts, DoD delivery metrics, 14-day verify table.
 """
 import hashlib
 from datetime import datetime
@@ -300,20 +300,29 @@ def render_detail(sym, k):
                       margin=dict(l=10, r=70, t=30, b=10))
     st.plotly_chart(fig, width="stretch", key=f"{k}_price")
 
+    # -------- 14 days delivery data (15 rows fetch, 14 display for DoD) --------
     try:
-        last_n = min(5, len(g))
+        display_n = 14
+        fetch_n = display_n + 1  # 15 rows fetch
+        last_n = min(fetch_n, len(g))
         tbl = g.tail(last_n).copy()
+
+        # DoD compute karo RAW data pe (ascending order me), phir reverse
+        tbl["Deliv_Qty"] = pd.to_numeric(tbl["DELIV_QTY"], errors="coerce").fillna(0).astype(int)
+        tbl["Deliv_%"] = pd.to_numeric(tbl["DELIV_PER"], errors="coerce").round(2)
+        tbl["DoD_Qty_%"] = (tbl["Deliv_Qty"].pct_change(1) * 100).round(1)
+        tbl["DoD_Deliv_%"] = tbl["Deliv_%"].diff(1).round(2)
+
+        # Ab reverse karo (newest first)
         tbl = tbl.iloc[::-1].reset_index(drop=True)
         tbl["Date"] = pd.to_datetime(tbl["Date"]).dt.strftime("%a, %d %b %Y")
         tbl["Prev_Close"] = pd.to_numeric(tbl["PREV_CLOSE"], errors="coerce").round(2)
         tbl["Close"] = pd.to_numeric(tbl["CLOSE_PRICE"], errors="coerce").round(2)
         tbl["Chg_%"] = ((tbl["Close"] / tbl["Prev_Close"] - 1) * 100).round(2)
-        tbl["Deliv_Qty"] = pd.to_numeric(tbl["DELIV_QTY"], errors="coerce").fillna(0).astype(int)
         tbl["Total_Qty"] = pd.to_numeric(tbl["TTL_TRD_QNTY"], errors="coerce").fillna(0).astype(int)
-        tbl["Deliv_%"] = pd.to_numeric(tbl["DELIV_PER"], errors="coerce").round(2)
-        # DoD: compare each row to row BELOW (since we reversed to newest first)
-        tbl["DoD_Qty_%"] = (tbl["Deliv_Qty"].pct_change(-1) * 100).round(1)
-        tbl["DoD_Deliv_%"] = tbl["Deliv_%"].diff(-1).round(2)
+
+        # 14 rows display karo (purani 15th row ko drop karo — usne DoD ke liye kaam kiya)
+        tbl = tbl.head(display_n).reset_index(drop=True)
 
         try:
             dp_3m = float(pd.to_numeric(g["DELIV_PER"], errors="coerce").tail(63).head(42).mean())
@@ -324,28 +333,28 @@ def render_detail(sym, k):
         except Exception:
             dq_3m = 0.0
 
-        st.markdown("#### 📋 Last 5 days delivery data (verify)")
+        st.markdown(f"#### 📋 Last {display_n} days delivery data (verify)")
         show_cols = ["Date", "Prev_Close", "Close", "Chg_%", "Deliv_Qty", "DoD_Qty_%",
                      "Total_Qty", "Deliv_%", "DoD_Deliv_%"]
         st.dataframe(
-            tbl[show_cols], hide_index=True, width="stretch",
+            tbl[show_cols], hide_index=True, width="stretch", height=520,
             column_config={
                 "Prev_Close": st.column_config.NumberColumn("Prev Close", format="₹%.2f"),
                 "Close":      st.column_config.NumberColumn("Close", format="₹%.2f"),
                 "Chg_%":      st.column_config.NumberColumn("Chg %", format="%+.2f%%"),
                 "Deliv_Qty":  st.column_config.NumberColumn("Deliv Qty", format="%d"),
                 "DoD_Qty_%":  st.column_config.NumberColumn("DoD Qty %", format="%+.1f%%",
-                                                            help="Kal se compare karke delivery qty kitni badhi."),
+                                                            help="Kal se delivery qty kitni % badhi/ghati."),
                 "Total_Qty":  st.column_config.NumberColumn("Total Qty", format="%d"),
                 "Deliv_%":    st.column_config.NumberColumn("Deliv %", format="%.2f%%"),
                 "DoD_Deliv_%": st.column_config.NumberColumn("DoD Deliv %", format="%+.2f pp",
-                                                            help="Kal se delivery % ka change (pp me)."),
+                                                            help="Kal se delivery % ka change (pp)."),
             })
         st.caption(f"**Reference averages (previous 2M):**  "
                    f"Deliv Qty: **{int(dq_3m):,}**  |  Deliv %: **{dp_3m:.2f}%**  —  "
                    f"ye numbers NSE bhavcopy se direct aate hain, koi calculation nahi.")
     except Exception as ex:
-        st.warning(f"Last 5 days table error: {ex}")
+        st.warning(f"Last {display_n if 'display_n' in dir() else 14} days table error: {ex}")
 
     wf = E.weekly_flows(g, 12)
     fig2 = go.Figure(go.Bar(x=[d.strftime("%d %b") for d, _ in wf], y=[f for _, f in wf],
