@@ -1,14 +1,18 @@
 """
-alt_data.py - Alternative data (v9)
+alt_data.py - Alternative data (v10)
 Bulk/Block deals, delivery value, RS vs REAL Nifty, FII/DII, insider, Telegram.
-Fixes:
-  - Telegram HTML-safe chunking (splits at newlines)
-  - Signature requires nifty param for RS computation
+Fixes over v9:
+  - RS vs Nifty used a 1-session-longer window than the stock's own Ret_1M/Ret_3M -> aligned
+  - Delivered value NaN'd for stocks with a split/bonus in window (qty x price distorted)
+  - FII/DII parsing handles comma-formatted numbers
+  - Telegram: lines longer than the limit are hard-split (HTTP 400 otherwise), 429 retry
+  - Telegram alert marks wide-range stocks
 """
 from __future__ import annotations
 
 import html
 import os
+import time
 from io import StringIO
 
 import numpy as np
@@ -25,6 +29,7 @@ _HEADERS = {
     "Referer": "https://www.nseindia.com/",
 }
 _SESSION = None
+_TG_LIMIT = 3900
 
 
 def _get_session():
@@ -40,6 +45,13 @@ def _get_session():
         pass
     _SESSION = s
     return s
+
+
+def _num(x, default=0.0):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except Exception:
+        return default
 
 
 def fetch_bulk_block_deals() -> pd.DataFrame:
@@ -113,7 +125,7 @@ def enrich_screener(scr, hist, deals, nifty=None):
     stats = dict(getattr(scr, "attrs", {}).get("stats", {}))
     sessions = sorted(hist.Date.unique()) if hist is not None and not hist.empty else []
 
-    # delivered value
+    # delivered value (qty x close, so skip stocks whose qty/price were split-adjusted)
     try:
         if len(sessions) >= 30:
             last21, prev42 = sessions[-21:], sessions[-63:-21]
@@ -124,16 +136,20 @@ def enrich_screener(scr, hist, deals, nifty=None):
             out = out.merge(v1, on="Symbol", how="left").merge(v3, on="Symbol", how="left")
             out["Deliv_Val_X"] = ((out.Deliv_Val_1M_Cr / len(last21))
                                   / (out.Deliv_Val_3M_Cr / max(1, len(prev42)))).replace([np.inf, -np.inf], np.nan)
+            if "Has_Split_Adjust" in out.columns:
+                bad = out.Has_Split_Adjust.fillna(False).astype(bool)
+                for c in ("Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr", "Deliv_Val_X"):
+                    out.loc[bad, c] = np.nan
             for c in ("Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr", "Deliv_Val_X"):
                 out[c] = out[c].round(2)
     except Exception:
         pass
 
-    # RS vs real Nifty
+    # RS vs real Nifty - SAME windows as engine's Ret_1M (c[-21]) and Ret_3M (c[-63])
     try:
-        if nifty is not None and not nifty.empty and len(sessions) >= 64:
-            n1 = M.return_between(nifty, sessions[-22], sessions[-1])
-            n3 = M.return_between(nifty, sessions[-64], sessions[-1])
+        if nifty is not None and not nifty.empty and len(sessions) >= 63:
+            n1 = M.return_between(nifty, sessions[-21], sessions[-1])
+            n3 = M.return_between(nifty, sessions[-63], sessions[-1])
             out["Nifty_1M"] = round(n1, 2) if np.isfinite(n1) else np.nan
             out["Nifty_3M"] = round(n3, 2) if np.isfinite(n3) else np.nan
             out["RS_1M"] = (out.Ret_1M - n1).round(2) if np.isfinite(n1) else np.nan
@@ -178,11 +194,7 @@ def fetch_fiidii():
                "dii_buy": 0.0, "dii_sell": 0.0, "dii_net": 0.0}
         for row in r.json():
             cat = str(row.get("category", "")).upper()
-            try:
-                buy, sell = float(row.get("buyValue", 0) or 0), float(row.get("sellValue", 0) or 0)
-                net = float(row.get("netValue", 0) or 0)
-            except Exception:
-                continue
+            buy, sell, net = _num(row.get("buyValue")), _num(row.get("sellValue")), _num(row.get("netValue"))
             out["date"] = row.get("date", out["date"])
             if "FII" in cat or "FPI" in cat:
                 out.update(fii_buy=buy, fii_sell=sell, fii_net=net)
@@ -225,28 +237,46 @@ def telegram_creds_from_env():
     return os.environ.get("TELEGRAM_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
+def _split_for_telegram(text, limit=_TG_LIMIT):
+    """Split at newlines; a single over-long line is hard-split too."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:                 # pathological long line
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if len(current) + len(line) + 1 > limit:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = (current + "\n" + line) if current else line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def send_telegram_message(token, chat_id, text):
-    """HTML-safe chunking — splits at newlines only."""
+    """HTML-safe chunking (splits at newlines) + one retry on HTTP 429."""
     if not token or not chat_id:
         return False, "Token ya Chat ID missing."
     try:
-        # Split at newlines to never break inside an HTML tag
-        chunks, current = [], ""
-        for line in text.split("\n"):
-            if len(current) + len(line) + 1 > 3900:
-                if current:
-                    chunks.append(current)
-                current = line
-            else:
-                current = (current + "\n" + line) if current else line
-        if current:
-            chunks.append(current)
-
-        for chunk in chunks:
-            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                              data={"chat_id": str(chat_id), "text": chunk,
-                                    "parse_mode": "HTML", "disable_web_page_preview": True},
-                              timeout=15)
+        for chunk in _split_for_telegram(text):
+            for attempt in range(2):
+                r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                  data={"chat_id": str(chat_id), "text": chunk,
+                                        "parse_mode": "HTML", "disable_web_page_preview": True},
+                                  timeout=15)
+                if r.status_code == 429 and attempt == 0:
+                    try:
+                        wait = int(r.json().get("parameters", {}).get("retry_after", 2))
+                    except Exception:
+                        wait = 2
+                    time.sleep(min(wait, 10))
+                    continue
+                break
             if not (r.status_code == 200 and r.json().get("ok")):
                 return False, f"HTTP {r.status_code}: {r.text[:200]}"
         return True, "Sent."
@@ -271,8 +301,9 @@ def format_telegram_alert(scr, deals, breadth, asof_date, top_n=10, nifty=None, 
             lines.append(f"<b>Top {len(d)} accumulation picks (not extended):</b>")
             for r in d.itertuples():
                 tag = "" if r.Fresh in ("None", None) else f" [{e(str(r.Fresh))}]"
+                wide = " ⚠️wide" if getattr(r, "Wide_Range", False) else ""
                 lines.append(f"• <b>{e(r.Symbol)}</b> ₹{r.Price:,.2f}  Score {int(r.Score)}  "
-                             f"Entry ₹{r.Entry:,.2f}  SL ₹{r.SL:,.2f}  T1 ₹{r.T1:,.2f}{tag}")
+                             f"Entry ₹{r.Entry:,.2f}  SL ₹{r.SL:,.2f}  T1 ₹{r.T1:,.2f}{tag}{wide}")
         fr = scr[scr.Fresh == "Spike today"].head(5)
         if not fr.empty:
             lines += ["", "<b>🔥 Spike today:</b> " + ", ".join(e(s) for s in fr.Symbol)]
