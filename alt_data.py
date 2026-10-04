@@ -266,7 +266,7 @@ def send_telegram_message(token, chat_id, text):
         for chunk in _split_for_telegram(text):
             for attempt in range(2):
                 r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                                  data={"chat_id": str(chat_id), "text": chunk,
+                                  data={"chat_id": str(chat_id), "text": chunk, "parse_mode": "HTML",
                                         "disable_web_page_preview": True},
                                   timeout=15)
                 if r.status_code == 429 and attempt == 0:
@@ -285,35 +285,50 @@ def send_telegram_message(token, chat_id, text):
 
 
 def format_telegram_alert(scr, deals, breadth, asof_date, top_n=10, nifty=None, stale_deals=False):
+    """Professional, compact Telegram alert. HTML is escaped and web previews are disabled on send."""
     e = html.escape
-    lines = [f"<b>📈 Smart Money Terminal — {e(str(asof_date))}</b>", ""]
+    lines = [
+        "<b>📊 SMART MONEY TERMINAL</b>",
+        f"<b>{e(str(asof_date))}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
     if breadth:
-        lines.append(f"<b>Market:</b> {e(str(breadth.get('nifty_trend', '-')))}")
-        lines.append(f"Breadth (>50DMA): {breadth.get('breadth_pct_50', 0)}%  |  "
-                     f"Advances: {breadth.get('ad_ratio', 0)}%")
-        if breadth.get("nifty_source"):
-            lines.append(f"Nifty source: {e(str(breadth['nifty_source']))}")
-        lines.append("")
+        trend = e(str(breadth.get("nifty_trend", "-")))
+        b50 = breadth.get("breadth_pct_50", 0)
+        ad = breadth.get("ad_ratio", 0)
+        lines += [
+            "<b>MARKET</b>",
+            f"Nifty: <b>{trend}</b>",
+            f"Breadth &gt;50DMA: <b>{b50}%</b>  |  A/D: <b>{ad}%</b>",
+        ]
+        if nifty:
+            lines.append(f"Nifty 50: <b>₹{float(nifty.get('price', 0)):,.2f}</b>  |  1D {float(nifty.get('chg_1d', 0)):+.2f}%")
+        lines += ["", "━━━━━━━━━━━━━━━━━━━━"]
+
     if scr is not None and not scr.empty:
-        d = scr[scr.Signal.isin(["Strong Accumulation", "Accumulation"])].sort_values("Score", ascending=False)
-        d = d[d.Stage != "Extended (already ran)"].head(top_n)
-        if not d.empty:
-            lines.append(f"<b>Top {len(d)} accumulation picks (not extended):</b>")
-            for r in d.itertuples():
-                tag = "" if r.Fresh in ("None", None) else f" [{e(str(r.Fresh))}]"
-                wide = " ⚠️wide" if getattr(r, "Wide_Range", False) else ""
-                lines.append(f"• <b>{e(r.Symbol)}</b> ₹{r.Price:,.2f}  Score {int(r.Score)}  "
-                             f"Entry ₹{r.Entry:,.2f}  SL ₹{r.SL:,.2f}  T1 ₹{r.T1:,.2f}{tag}{wide}")
-        fr = scr[scr.Fresh == "Spike today"].head(5)
+        d = scr[scr.Signal.isin(["Strong Accumulation", "Accumulation"])].copy()
+        d = d[d.Stage != "Extended (already ran)"].sort_values(["Score", "Net_Flow_1M"], ascending=False).head(top_n)
+        lines.append(f"<b>TOP ACCUMULATION — {len(d)} stocks</b>")
+        if d.empty:
+            lines.append("No fresh accumulation setup in the selected universe.")
+        else:
+            for i, r in enumerate(d.itertuples(), 1):
+                lines.append(
+                    f"<b>{i}. {e(str(r.Symbol))}</b>  ₹{float(r.Price):,.2f}  |  Score <b>{int(r.Score)}</b>\n"
+                    f"   Entry ₹{float(r.Entry):,.2f}  •  SL ₹{float(r.SL):,.2f}  •  T1 ₹{float(r.T1):,.2f}"
+                )
+        fr = scr[scr.Fresh == "Spike today"].sort_values("Score", ascending=False).head(5)
         if not fr.empty:
-            lines += ["", "<b>🔥 Spike today:</b> " + ", ".join(e(s) for s in fr.Symbol)]
+            lines += ["", "<b>🔥 FRESH SPIKE</b>", "  " + "  •  ".join(e(str(x)) for x in fr.Symbol)]
+
     if deals is not None and not deals.empty and not stale_deals:
         buys = deals[deals.Buy_Sell.astype(str).str.startswith("B")].nlargest(5, "Value_Cr")
         if not buys.empty:
-            lines += ["", "<b>Top bulk/block BUYs:</b>"]
+            lines += ["", "<b>🏦 TOP BULK/BLOCK BUY</b>"]
             for r in buys.itertuples():
-                lines.append(f"• {e(r.Symbol)}: ₹{r.Value_Cr:.1f} Cr ({r.Deal_Type})")
+                lines.append(f"{e(str(r.Symbol))}  •  ₹{float(r.Value_Cr):,.1f} Cr  •  {e(str(r.Deal_Type))}")
     elif stale_deals:
-        lines += ["", "<i>Bulk/block data is stale (NSE not updated yet).</i>"]
-    lines += ["", "<i>Analysis tool only. Not investment advice.</i>"]
+        lines += ["", "<i>Bulk/block data not updated by NSE yet.</i>"]
+
+    lines += ["", "━━━━━━━━━━━━━━━━━━━━", "<i>Analysis tool only • Not investment advice</i>"]
     return "\n".join(lines)
