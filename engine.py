@@ -218,9 +218,10 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
 
     rows = []
     for sym, g in hist.groupby("Symbol", sort=False):
-        g = _adjust_splits(g)
-        if len(g) < 20:
+         g = _adjust_splits(g)
+        if len(g) < 5:
             continue
+        is_new_listing = len(g) < 20
         c = g["CLOSE_PRICE"].astype(float).values
         h = g["HIGH_PRICE"].astype(float).values
         l = g["LOW_PRICE"].astype(float).values
@@ -395,6 +396,7 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
             "Ret_1W": round(ret_1w, 2),
             "Ret_1M": round(ret_1m, 2),
             "Ret_3M": round(ret_3m, 2),
+            "Is_New_Listing": bool(is_new_listing),
         })
 
     scr = pd.DataFrame(rows)
