@@ -144,6 +144,9 @@ try:
         _warn.append("Kuch stocks ka price 0 hai — bhavcopy row corrupt.")
     if scr.Deliv_Qty_X.gt(20).any():
         _warn.append(f"{int(scr.Deliv_Qty_X.gt(20).sum())} stocks me Deliv qty 1M÷3M > 20x — split/bonus adjust issue ho sakta hai.")
+    if "Has_Split_Adjust" in scr.columns and scr.Has_Split_Adjust.any():
+        _warn.append(f"{int(scr.Has_Split_Adjust.sum())} stocks me recent split/bonus detect hua — "
+                     f"unka Score/ratios **verify** karo (split flag screener table me 'Split?' column me hai).")
 except Exception:
     pass
 if _warn:
@@ -167,6 +170,12 @@ def render_detail(sym: str, k: str):
             "1M vs 3M comparison weak hai (3M avg me ~kam sessions aaye hain). "
             "**Delivery %, bulk/block deals, aur price action pe focus karo.** "
             "Ye stock 20+ sessions ke baad full metrics ke saath screener me aayega."
+        )
+    if r.get("Has_Split_Adjust", False):
+        st.warning(
+            "⚠️ **Is stock me split/bonus detect hua hai last 3 mahine me.** "
+            "Delivered qty ratios (1M÷3M) aur Score **unreliable** ho sakte hain kyunki adjustment "
+            "perfect nahi hoti. **Delivery %, price action, aur bulk deals pe zyada bharosa karo.**"
         )
 
     sc = "g" if r.Score >= 55 else "y" if r.Score >= 35 else "r"
@@ -291,14 +300,24 @@ def detail_dialog(sym: str):
     render_detail(sym, "dlg")
 
 
-TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3",
+TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Has_Split_Adjust",
+              "Price", "Entry_Zone", "Entry_Status", "SL", "T1", "T2", "T3",
               "Score", "Signal", "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage",
               "Deliv_Qty_X", "Today_X", "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M",
               "Acc_Days", "Range_Pct", "Chg_Pct", "RS_1M", "Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr",
               "Bulk_Flag", "Bulk_Net_Cr", "Deals_Today", "Appearances_120D", "Days_Since_First", "Sector"]
+
 TABLE_CFG = {
     "Symbol": st.column_config.TextColumn("Symbol", pinned=True),
-    "Reentry": st.column_config.TextColumn("Re-entry", help="Past 120 days ke screener history se."),     "Is_New_Listing": st.column_config.CheckboxColumn("🆕 New", help="Recently listed — 20 sessions se kam data. 1M vs 3M comparison weak hai."),
+    "Reentry": st.column_config.TextColumn(
+        "Re-entry",
+        help="Past 120 days ke screener history se."),
+    "Is_New_Listing": st.column_config.CheckboxColumn(
+        "🆕 New",
+        help="Recently listed — 20 sessions se kam data. 1M vs 3M comparison weak hai."),
+    "Has_Split_Adjust": st.column_config.CheckboxColumn(
+        "Split?",
+        help="Last 3 mahine me split/bonus detect hua. Score/ratios verify karo."),
     "Price": st.column_config.NumberColumn("Price", format="₹%.2f"),
     "Entry_Zone": st.column_config.TextColumn("Entry zone (₹)"),
     "Entry_Status": st.column_config.TextColumn("Price vs zone"),
@@ -308,8 +327,9 @@ TABLE_CFG = {
     "T3": st.column_config.NumberColumn("T3", format="₹%.2f"),
     "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
     "Fresh": st.column_config.TextColumn("Fresh activity"),
-    "Last5": st.column_config.TextColumn("Last 5 days", help="Purana → aaj. 🟢 strong delivery + price up, "
-                                         "🔴 strong delivery + price down, ⚪ normal"),
+    "Last5": st.column_config.TextColumn(
+        "Last 5 days",
+        help="Purana → aaj. 🟢 strong delivery + price up, 🔴 strong delivery + price down, ⚪ normal"),
     "Buy_Weeks": st.column_config.NumberColumn("Buy weeks /4", format="%d"),
     "Deliv_Qty_X": st.column_config.NumberColumn("Deliv qty 1M÷3M", format="%.2fx"),
     "Today_X": st.column_config.NumberColumn("Today deliv ÷ 3M avg", format="%.2fx"),
@@ -481,7 +501,7 @@ with tab1:
 - **Delivered qty 1M ÷ pichle 2M avg**: ≥1.5x → 20, ≥1.2x → 14, ≥1.05x → 7
 - **Delivery % (1M − pichle 2M)**: ≥8pp → 15, ≥4pp → 10, >0 → 4
 - **Net buy flow 1M**: ≥30% → 20, ≥15% → 14, >0 → 7
-- **Buying weeks** (last 4): 4 → 15, 3 → 11, 2 → 6
+- **Buying weeks** (last 4 calendar weeks): 4 → 15, 3 → 11, 2 → 6
 - **Setup** In range / Breakout → 10
 - **Range hold** → 10
 - **Aaj ki delivered qty ≥ 3M avg** → 10
@@ -493,10 +513,9 @@ Har roz ka screener output `signals_log.db` me save hota hai. Jab bhi koi stock 
 - **🔁 Repeat** = 3+ baar aaya hai
 - **🔁 SL hit earlier** = pehle aaya tha aur tab SL laga tha
 
-SL hit detection automatic hai — jo bhi stock screener me aaya, uska SL price DB me save hota hai,
-aur jab bhi woh SL break hoga future me, mark ho jayega. **Tumhe kuch manual nahi karna.**
-
-Stock detail me **"Re-entry history"** section me us stock ke saare past appearances dikhte hain.
+**Split/Bonus flag:**
+Agar stock me last 3 mahine me split/bonus hua hai, to "Split?" column ✅ hoga aur stock detail me warning aayegi.
+Un stocks me Deliv_Qty_X aur Score unreliable ho sakte hain — delivery %, price, bulk deals pe bharosa karo.
         """)
 
 # ------------------------- Sector rotation -------------------------------- #
