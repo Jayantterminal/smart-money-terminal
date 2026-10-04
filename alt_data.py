@@ -1,6 +1,9 @@
 """
-alt_data.py - Alternative data (v8)
-Bulk/Block deals, delivery value, RS vs real Nifty, FII/DII, insider trades, Telegram.
+alt_data.py - Alternative data (v9)
+Bulk/Block deals, delivery value, RS vs REAL Nifty, FII/DII, insider, Telegram.
+Fixes:
+  - Telegram HTML-safe chunking (splits at newlines)
+  - Signature requires nifty param for RS computation
 """
 from __future__ import annotations
 
@@ -39,9 +42,6 @@ def _get_session():
     return s
 
 
-# --------------------------------------------------------------------------- #
-# Bulk / block deals (NSE publishes only the latest session)
-# --------------------------------------------------------------------------- #
 def fetch_bulk_block_deals() -> pd.DataFrame:
     cols = ["Date", "Symbol", "Client", "Buy_Sell", "Qty", "Price", "Value_Cr", "Deal_Type"]
     frames = []
@@ -106,9 +106,6 @@ def deals_table(deals, limit=200):
     return d.sort_values("Value_Cr", ascending=False).head(limit)
 
 
-# --------------------------------------------------------------------------- #
-# Screener enrichment
-# --------------------------------------------------------------------------- #
 def enrich_screener(scr, hist, deals, nifty=None):
     if scr is None or scr.empty:
         return scr
@@ -116,7 +113,7 @@ def enrich_screener(scr, hist, deals, nifty=None):
     stats = dict(getattr(scr, "attrs", {}).get("stats", {}))
     sessions = sorted(hist.Date.unique()) if hist is not None and not hist.empty else []
 
-    # delivered value (split-invariant: qty x price)
+    # delivered value
     try:
         if len(sessions) >= 30:
             last21, prev42 = sessions[-21:], sessions[-63:-21]
@@ -132,25 +129,28 @@ def enrich_screener(scr, hist, deals, nifty=None):
     except Exception:
         pass
 
-    # relative strength vs the REAL Nifty over the same sessions
+    # RS vs real Nifty
     try:
         if nifty is not None and not nifty.empty and len(sessions) >= 64:
             n1 = M.return_between(nifty, sessions[-22], sessions[-1])
             n3 = M.return_between(nifty, sessions[-64], sessions[-1])
             out["Nifty_1M"] = round(n1, 2) if np.isfinite(n1) else np.nan
+            out["Nifty_3M"] = round(n3, 2) if np.isfinite(n3) else np.nan
             out["RS_1M"] = (out.Ret_1M - n1).round(2) if np.isfinite(n1) else np.nan
             out["RS_3M"] = (out.Ret_3M - n3).round(2) if np.isfinite(n3) else np.nan
     except Exception:
         pass
 
-    # bulk / block deals (only if the deals file belongs to the same session)
+    # bulk / block deals
     out["Bulk_Buy_Cr"], out["Bulk_Sell_Cr"], out["Bulk_Net_Cr"] = 0.0, 0.0, 0.0
     out["Deals_Today"], out["Bulk_Flag"] = 0, "-"
     try:
         dd = deals_date(deals)
         asof = pd.Timestamp(sessions[-1]) if sessions else None
-        stats["deals_stale"] = bool(dd is not None and asof is not None and dd.normalize() != asof.normalize())
-        if deals is not None and not deals.empty and not stats["deals_stale"]:
+        stale = bool(dd is not None and asof is not None and dd.normalize() != asof.normalize())
+        stats["deals_stale"] = stale
+        stats["deals_date"] = str(dd.date()) if dd is not None else None
+        if deals is not None and not deals.empty and not stale:
             d = deals.copy()
             d["Value_Cr"] = pd.to_numeric(d["Value_Cr"], errors="coerce").fillna(0)
             d["_buy"] = d["Buy_Sell"].astype(str).str.startswith("B")
@@ -169,9 +169,6 @@ def enrich_screener(scr, hist, deals, nifty=None):
     return out
 
 
-# --------------------------------------------------------------------------- #
-# FII / DII + insider (NSE APIs - often blocked on cloud IPs)
-# --------------------------------------------------------------------------- #
 def fetch_fiidii():
     try:
         r = _get_session().get("https://www.nseindia.com/api/fiidiiTradeReact", timeout=15)
@@ -209,7 +206,8 @@ def fetch_insider_trades(days_back: int = 7) -> pd.DataFrame:
         for x in (r.json().get("data") or []):
             try:
                 val = pd.to_numeric(x.get("secVal") or x.get("value") or 0, errors="coerce")
-                rows.append([x.get("date") or x.get("intimDt") or "", str(x.get("symbol", "")).strip().upper(),
+                rows.append([x.get("date") or x.get("intimDt") or "",
+                             str(x.get("symbol", "")).strip().upper(),
                              str(x.get("acqName") or x.get("personName") or ""),
                              str(x.get("personCategory") or ""),
                              str(x.get("tdpTransactionType") or x.get("buyOrSell") or "").upper(),
@@ -223,21 +221,32 @@ def fetch_insider_trades(days_back: int = 7) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
 
 
-# --------------------------------------------------------------------------- #
-# Telegram
-# --------------------------------------------------------------------------- #
 def telegram_creds_from_env():
     return os.environ.get("TELEGRAM_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
 def send_telegram_message(token, chat_id, text):
+    """HTML-safe chunking — splits at newlines only."""
     if not token or not chat_id:
         return False, "Token ya Chat ID missing."
     try:
-        for i in range(0, len(text), 3900):                     # Telegram limit 4096
+        # Split at newlines to never break inside an HTML tag
+        chunks, current = [], ""
+        for line in text.split("\n"):
+            if len(current) + len(line) + 1 > 3900:
+                if current:
+                    chunks.append(current)
+                current = line
+            else:
+                current = (current + "\n" + line) if current else line
+        if current:
+            chunks.append(current)
+
+        for chunk in chunks:
             r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                              data={"chat_id": str(chat_id), "text": text[i:i + 3900], "parse_mode": "HTML",
-                                    "disable_web_page_preview": True}, timeout=15)
+                              data={"chat_id": str(chat_id), "text": chunk,
+                                    "parse_mode": "HTML", "disable_web_page_preview": True},
+                              timeout=15)
             if not (r.status_code == 200 and r.json().get("ok")):
                 return False, f"HTTP {r.status_code}: {r.text[:200]}"
         return True, "Sent."
@@ -245,13 +254,15 @@ def send_telegram_message(token, chat_id, text):
         return False, f"Error: {e}"
 
 
-def format_telegram_alert(scr, deals, breadth, asof_date, top_n=10):
+def format_telegram_alert(scr, deals, breadth, asof_date, top_n=10, nifty=None, stale_deals=False):
     e = html.escape
     lines = [f"<b>📈 Smart Money Terminal — {e(str(asof_date))}</b>", ""]
     if breadth:
         lines.append(f"<b>Market:</b> {e(str(breadth.get('nifty_trend', '-')))}")
         lines.append(f"Breadth (>50DMA): {breadth.get('breadth_pct_50', 0)}%  |  "
                      f"Advances: {breadth.get('ad_ratio', 0)}%")
+        if breadth.get("nifty_source"):
+            lines.append(f"Nifty source: {e(str(breadth['nifty_source']))}")
         lines.append("")
     if scr is not None and not scr.empty:
         d = scr[scr.Signal.isin(["Strong Accumulation", "Accumulation"])].sort_values("Score", ascending=False)
@@ -265,11 +276,13 @@ def format_telegram_alert(scr, deals, breadth, asof_date, top_n=10):
         fr = scr[scr.Fresh == "Spike today"].head(5)
         if not fr.empty:
             lines += ["", "<b>🔥 Spike today:</b> " + ", ".join(e(s) for s in fr.Symbol)]
-    if deals is not None and not deals.empty:
+    if deals is not None and not deals.empty and not stale_deals:
         buys = deals[deals.Buy_Sell.astype(str).str.startswith("B")].nlargest(5, "Value_Cr")
         if not buys.empty:
             lines += ["", "<b>Top bulk/block BUYs:</b>"]
             for r in buys.itertuples():
                 lines.append(f"• {e(r.Symbol)}: ₹{r.Value_Cr:.1f} Cr ({r.Deal_Type})")
+    elif stale_deals:
+        lines += ["", "<i>Bulk/block data is stale (NSE not updated yet).</i>"]
     lines += ["", "<i>Analysis tool only. Not investment advice.</i>"]
     return "\n".join(lines)
