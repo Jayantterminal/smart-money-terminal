@@ -1,6 +1,10 @@
 """
 daily_job.py - headless daily run (GitHub Actions / cron / manual)
-Fixes: min turnover filter = 5 Cr (illiquid stocks hataye).
+v11 fixes:
+  - re-entry stats computed BEFORE logging today's signals (and engine ignores same-day rows anyway)
+  - Nifty snapshot cut at bhavcopy as-of date
+  - deals-stale flag read before the screener frame is rebuilt
+  - network helpers wrapped so one failing source can't kill the job
 """
 from __future__ import annotations
 
@@ -33,32 +37,38 @@ def main() -> int:
     asof = pd.Timestamp(hist.Date.max())
     asof_s = f"{asof:%Y-%m-%d}"
     print(f"As-of {asof_s} | sessions {info['days']} | delivery coverage {info['delivery_cov']}% | "
-          f"dropped {info['dropped']}")
+          f"dropped {info['dropped']} | errors {info['errors']} | missing days {info.get('missing', 0)}")
 
     nifty_df = M.fetch_index("^NSEI", "2y")
-    nifty_snap = M.snapshot(nifty_df)
+    nifty_snap = M.snapshot(nifty_df, asof=asof)
     if not nifty_snap:
         print("Warning: Nifty data unavailable, using fallback")
 
-    # FIX: min turnover = 5 Cr
     scr = E.compute_screener(hist, (), MIN_TURNOVER_CR, E.fetch_sector_map())
     if scr.empty:
         print("Screener empty")
         return 1
     print(f"Screener: {len(scr)} stocks after min turnover ₹{MIN_TURNOVER_CR} Cr filter")
 
-    deals = A.fetch_bulk_block_deals()
-    scr = A.enrich_screener(scr, hist, deals, nifty_df)
+    try:
+        deals = A.fetch_bulk_block_deals()
+    except Exception as ex:
+        print("Deals fetch failed:", ex)
+        deals = pd.DataFrame()
+    try:
+        scr = A.enrich_screener(scr, hist, deals, nifty_df)
+    except Exception as ex:
+        print("Enrich failed:", ex)
+    stale_deals = bool(scr.attrs.get("stats", {}).get("deals_stale", False))
 
-    n_logged = E.log_signals(scr, asof)
     outcomes = E.signal_outcomes(hist)
-    scr = E.reentry_stats(scr, asof, outcomes)
+    scr = E.reentry_stats(scr, asof, outcomes)     # first: uses PREVIOUS days' log only
+    n_logged = E.log_signals(scr, asof)            # then: log today's accumulation signals
 
     breadth = E.market_breadth(hist, scr, nifty_df)
 
     n_acc = int(scr.Signal.isin(E.ACC_SIGNALS).sum())
     n_fresh = int(scr.Fresh.isin(E.FRESH_SET).sum())
-    stale_deals = bool(scr.attrs.get("stats", {}).get("deals_stale", False))
 
     status = {
         "asof": asof_s,
