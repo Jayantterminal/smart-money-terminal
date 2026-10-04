@@ -1,18 +1,24 @@
-name: Daily NSE Bhavcopy Ingestion & Purge
+name: Daily NSE Data Fetch & Telegram Alert
 
 on:
   schedule:
-    # Runs Monday to Friday at 1:30 PM UTC (7:00 PM IST)
+    # 7:00 PM IST = 1:30 PM UTC, Mon-Fri (NSE publishes bhavcopy by 6:30 PM IST)
     - cron: '30 13 * * 1-5'
-  workflow_dispatch: # Allows manual trigger anytime from GitHub UI
+  workflow_dispatch:   # Manual trigger from GitHub UI
+
+permissions:
+  contents: write      # Needed to commit back data/
 
 jobs:
-  update-bhavcopy:
+  daily-run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -22,16 +28,36 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pandas numpy requests yfinance
 
-      - name: Execute Daily Bhavcopy Fetch & 3-Month Prune
+      - name: Run Daily Job (fetch + log + Telegram)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python -c "from engine import update_bhavcopy_store; success, msg = update_bhavcopy_store(); print(msg)"
+          python daily_job.py
+        continue-on-error: false
 
-      - name: Commit & Push Updated Rolling Database
+      - name: Commit & Push data/ (signals log + last run)
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-sync daily Bhavcopy & rolling 3M purge [skip ci]" && git push)
+          git add data/ || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto: signals log & last run $(date -u +%Y-%m-%d) [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Upload last_run.json as artifact (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-run
+          path: data/last_run.json
+          if-no-files-found: ignore
+          retention-days: 7
