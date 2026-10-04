@@ -257,7 +257,7 @@ def render_detail(sym, k):
         why.append("Price abhi 20D low ke paas hai - move shuru hona baki ho sakta hai.")
     why.append(f"1 mahine me delivered qty pichle 2 mahine ke avg se {r.Deliv_Qty_X:.2f}x; "
                f"delivery % {r.Deliv_Per_Chg:+.1f}pp.")
-    why.append(f"<b>DoD:</b> Aaj delivery qty {dodq:+.0f}% vs kal | Delivery % change {dodp:+.2f}pp | "
+    why.append(f"<b>DoD:</b> Aaj delivery qty {dodq:+.0f}% vs kal | Delivery % change {dodp:+.2f}% | "
                f"3D ratio {d3r:.2f}x.")
     why.append(f"Net buy flow {r.Net_Flow_1M:+.0f}% (pichle 2M: {r.Net_Flow_3M:+.0f}%); "
                f"{r.Acc_Days} accumulation din vs {r.Dist_Days} distribution din (last 21).")
