@@ -1,32 +1,47 @@
 """
 market.py - Real index data (Yahoo Finance) for Nifty trend, 20/50/200 DMA and relative strength.
 Replaces the old 'Nifty proxy' (median stock price), which was meaningless.
+v10: retry on Yahoo failure; snapshot() can be cut at the bhavcopy as-of date so the
+     Nifty trend and the stock data refer to the SAME session.
 """
 from __future__ import annotations
+
+import time
 
 import numpy as np
 import pandas as pd
 
 
-def fetch_index(symbol: str = "^NSEI", period: str = "2y") -> pd.DataFrame:
+def fetch_index(symbol: str = "^NSEI", period: str = "2y", retries: int = 2) -> pd.DataFrame:
     """Daily closes -> DataFrame[Date, Close]. Empty frame if Yahoo is unreachable."""
+    empty = pd.DataFrame(columns=["Date", "Close"])
     try:
         import yfinance as yf
-        df = yf.download(symbol, period=period, interval="1d", auto_adjust=True, progress=False)
-        if df is None or df.empty:
-            return pd.DataFrame(columns=["Date", "Close"])
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        out = df[["Close"]].dropna().reset_index()
-        out.columns = ["Date", "Close"]
-        out["Date"] = pd.to_datetime(out["Date"]).dt.tz_localize(None).dt.normalize()
-        return out.sort_values("Date").reset_index(drop=True)
     except Exception:
-        return pd.DataFrame(columns=["Date", "Close"])
+        return empty
+    for attempt in range(retries):
+        try:
+            df = yf.download(symbol, period=period, interval="1d", auto_adjust=True,
+                             progress=False, threads=False)
+            if df is None or df.empty:
+                time.sleep(1.5)
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            out = df[["Close"]].dropna().reset_index()
+            out.columns = ["Date", "Close"]
+            out["Date"] = pd.to_datetime(out["Date"]).dt.tz_localize(None).dt.normalize()
+            return out.sort_values("Date").reset_index(drop=True)
+        except Exception:
+            time.sleep(1.5)
+    return empty
 
 
-def snapshot(df: pd.DataFrame, vix: pd.DataFrame | None = None) -> dict:
-    """Trend summary of an index. {} when data is missing."""
+def snapshot(df: pd.DataFrame, vix: pd.DataFrame | None = None, asof=None) -> dict:
+    """Trend summary of an index. {} when data is missing.
+    asof: ignore bars after this date (keeps Nifty aligned with EOD bhavcopy data)."""
+    if df is not None and not df.empty and asof is not None:
+        df = df[pd.to_datetime(df["Date"]) <= pd.Timestamp(asof)]
     if df is None or df.empty or len(df) < 25:
         return {}
     c = df["Close"].astype(float).values
