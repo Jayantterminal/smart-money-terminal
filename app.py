@@ -347,7 +347,7 @@ def render_detail(sym, k):
                                                             help="Kal se delivery qty kitni % badhi/ghati."),
                 "Total_Qty":  st.column_config.NumberColumn("Total Qty", format="%d"),
                 "Deliv_%":    st.column_config.NumberColumn("Deliv %", format="%.2f%%"),
-                "DoD_Deliv_%": st.column_config.NumberColumn("DoD Deliv %", format="%+.2f pp",
+                "DoD_Deliv_%": st.column_config.NumberColumn("DoD Deliv %", format="%+.2f %",
                                                             help="Kal se delivery % ka change (pp)."),
             })
         st.caption(f"**Reference averages (previous 2M):**  "
@@ -419,7 +419,7 @@ TABLE_CFG = {
     "Today_X": st.column_config.NumberColumn("Today ÷ 3M avg", format="%.2fx"),
     "Deliv_Qty_DoD": st.column_config.NumberColumn("Deliv qty DoD", format="%+.0f%%",
                                                    help="Aaj ki delivery qty vs kal. +100% = 2x jump."),
-    "Deliv_Per_DoD": st.column_config.NumberColumn("Deliv % DoD", format="%+.2f pp",
+    "Deliv_Per_DoD": st.column_config.NumberColumn("Deliv % DoD", format="%+.2f %",
                                                    help="Aaj ka delivery % minus kal ka (percentage points)."),
     "Deliv_3D_Ratio": st.column_config.NumberColumn("Deliv 3D÷prev 3D", format="%.2fx",
                                                     help="Last 3 din ka avg delivery ÷ usse pehle 3 din ka avg. "
