@@ -1,11 +1,7 @@
 """
-app.py - Smart Money Terminal (v9 - FIXED)
-- Real Nifty (Yahoo) integrated
-- Split warnings filtered (<200 only)
-- 200 DMA shows N/A when insufficient
-- Breadth KPI without FII/DII dependency
-- CSV-based signal log (persistent)
-- Stale deals warning
+app.py - Smart Money Terminal (v10 - FIXED)
+- min turnover 5 Cr filter
+- Wide_Range warning
 """
 import hashlib
 
@@ -55,7 +51,8 @@ def load():
     hist, info = E.fetch_history(65)
     nifty_df = M.fetch_index("^NSEI", "2y")
     nifty_snap = M.snapshot(nifty_df)
-    scr = E.compute_screener(hist, (), 0.0, E.fetch_sector_map()) if not hist.empty else pd.DataFrame()
+    # FIX: min turnover 5 Cr
+    scr = E.compute_screener(hist, (), 5.0, E.fetch_sector_map()) if not hist.empty else pd.DataFrame()
     deals = pd.DataFrame(); insider = pd.DataFrame(); fiidii = None; breadth = {}
     if not scr.empty:
         try: deals = A.fetch_bulk_block_deals()
@@ -112,7 +109,6 @@ BICON = {"Continuing": "🟢 Continuing", "Just started": "🔵 Just started",
 QICON = {"Leading": "🟢 Leading", "Improving": "🔵 Improving", "Weakening": "🟡 Weakening", "Lagging": "🔴 Lagging"}
 QCOL = {"Leading": "#22c55e", "Improving": "#3b82f6", "Weakening": "#f59e0b", "Lagging": "#ef4444"}
 
-# ------------------------------ sidebar ----------------------------------- #
 with st.sidebar:
     st.markdown("### ⚙️ Controls")
     if st.button("🔄 Refresh data now"):
@@ -129,20 +125,18 @@ with st.sidebar:
 **1.** Telegram → **@BotFather** → `/newbot` → token
 **2.** Telegram → **@userinfobot** → chat_id
 **3.** Apne bot ko `/start` bhejo (zaroori!)
-**4.** Neeche paste karke "Save token" dabao
-
-GitHub Actions wale auto alert ke liye **GitHub Secrets** me daalo (sidebar ke niche instructions).
+**4.** GitHub Secrets me daalo (auto alert ke liye)
         """)
     env_tok, env_chat = A.telegram_creds_from_env()
     if env_tok and env_chat:
-        st.success("✅ GitHub Secrets me token mila — use ho raha hai")
+        st.success("✅ GitHub Secrets me token mila")
     tg_token = st.text_input("Bot Token", value=st.session_state.get("tg_token", ""), type="password")
     tg_chat  = st.text_input("Chat ID",   value=st.session_state.get("tg_chat", ""))
     if st.button("💾 Save token"):
         st.session_state["tg_token"] = tg_token
         st.session_state["tg_chat"]  = tg_chat
         st.success("Saved for this session.")
-    st.caption("Source: NSE bhavcopy + bulk/block + FII/DII + Yahoo Nifty (EOD, ~6-7 PM IST). "
+    st.caption("Source: NSE bhavcopy + bulk/block + FII/DII + Yahoo Nifty (EOD). "
                "Analysis tool only, not investment advice.")
 
 st.markdown(f"""
@@ -156,7 +150,6 @@ st.markdown(f"""
 if info["errors"]:
     st.warning(f"{info['errors']} din ka NSE data download nahi ho paya - Refresh karke dekho.")
 
-# Top strip
 if fiidii or breadth or nifty_snap:
     c1, c2, c3, c4 = st.columns(4)
     if fiidii:
@@ -183,8 +176,7 @@ if fiidii or breadth or nifty_snap:
             f"20DMA: {breadth.get('breadth_pct_20','-')}%")
 
 if DEALS_STALE:
-    st.info(f"ℹ️ Bulk/block deals aaj ke nahi (last: {DEALS_DATE}). NSE ne abhi publish nahi kiya. "
-            "Deals columns 0 dikha rahe hain.")
+    st.info(f"ℹ️ Bulk/block deals aaj ke nahi (last: {DEALS_DATE}). NSE ne abhi publish nahi kiya.")
 
 _warn = []
 if info.get("days", 0) < 40:
@@ -196,9 +188,11 @@ try:
         _warn.append("Kuch stocks ka price 0 hai — bhavcopy row corrupt.")
     if "Has_Split_Adjust" in scr.columns:
         n_split = int(scr.Has_Split_Adjust.sum())
-        # Only warn if reasonable (not bug-level)
         if 0 < n_split < 200:
             _warn.append(f"{n_split} stocks me recent split/bonus detect hua — unka Score/ratios verify karo.")
+    if "Wide_Range" in scr.columns and scr.Wide_Range.any():
+        n_wr = int(scr.Wide_Range.sum())
+        _warn.append(f"{n_wr} stocks me 30D range bahut wide hai (>40%) — targets % based rakhe gaye hain.")
 except Exception:
     pass
 if _warn:
@@ -211,7 +205,6 @@ else:
     pool = scr[(scr.Avg_Turnover_Cr >= min_turn) | scr.Symbol.isin(extras)]
 
 
-# --------------------------- shared pieces -------------------------------- #
 def render_detail(sym, k):
     r = scr[scr.Symbol == sym].iloc[0]
     g = E.symbol_view(hist, sym).tail(80)
@@ -220,6 +213,9 @@ def render_detail(sym, k):
         st.warning(f"🆕 **Recently listed** — sirf {len(g)} sessions. 1M vs 3M comparison weak hai.")
     if r.get("Has_Split_Adjust", False):
         st.warning("⚠️ **Split/bonus detect hua hai.** Delivered qty ratios aur Score unreliable ho sakte hain.")
+    if r.get("Wide_Range", False):
+        st.warning(f"⚠️ **30D range bahut wide hai ({r.Range_Pct:.1f}%)** — targets (T1/T2/T3) % based rakhe gaye hain "
+                   "(10%/20%/35%). Chart pe range ko zoom karke dekho.")
 
     sc = "g" if r.Score >= 55 else "y" if r.Score >= 35 else "r"
     bc = {"Continuing": "g", "Just started": "g", "Fading": "y", "Not buying": "r"}[r.Buying_Status]
@@ -328,7 +324,6 @@ def render_detail(sym, k):
                       margin=dict(l=10, r=70, t=30, b=10))
     st.plotly_chart(fig, width="stretch", key=f"{k}_price")
 
-    # 14-day table
     try:
         display_n = 14
         fetch_n = display_n + 1
@@ -416,7 +411,7 @@ TABLE_COLS = ["Symbol", "Reentry", "Is_New_Listing", "Price", "Entry_Zone", "Ent
               "Score", "Signal", "Fresh", "Last5", "Buying_Status", "Buy_Weeks", "Setup", "Stage",
               "Deliv_Qty_X", "Today_X", "Deliv_Qty_DoD", "Deliv_Per_DoD", "Deliv_3D_Ratio",
               "Deliv_Per_Chg", "Net_Flow_1M", "Deliv_Per_1M", "Deliv_Per_3M",
-              "Acc_Days", "Range_Pct", "Chg_Pct", "RS_1M", "Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr",
+              "Acc_Days", "Range_Pct", "Wide_Range", "Chg_Pct", "RS_1M", "Deliv_Val_1M_Cr", "Deliv_Val_3M_Cr",
               "Turnover_1M_Cr", "Turnover_X", "Trades_1M_Avg", "Trades_per_Cr", "Close_vs_Avg",
               "Bulk_Flag", "Bulk_Net_Cr", "Deals_Today", "Appearances_120D", "Days_Since_First", "Sector"]
 TABLE_CFG = {
@@ -445,6 +440,7 @@ TABLE_CFG = {
     "Deliv_Per_3M": st.column_config.NumberColumn("Deliv % prev 2M", format="%.1f%%"),
     "Acc_Days": st.column_config.NumberColumn("Acc days /21", format="%d"),
     "Range_Pct": st.column_config.NumberColumn("30D range", format="%.1f%%"),
+    "Wide_Range": st.column_config.CheckboxColumn("⚠️ Wide", help="30D range > 40% - targets % based hain"),
     "Chg_Pct": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
     "RS_1M": st.column_config.NumberColumn("RS vs Nifty 1M", format="%+.1f%%"),
     "Deliv_Val_1M_Cr": st.column_config.NumberColumn("Deliv val 1M", format="₹%.1f Cr"),
@@ -488,7 +484,6 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
 ])
 open_sym = None
 
-# ---------------------------- Tab 1: Screener ----------------------------- #
 with tab1:
     QUICK = {
         "strong": ("Strong acc.", pool[pool.Signal == "Strong Accumulation"]),
@@ -591,7 +586,6 @@ with tab1:
     open_sym = stock_table(d, "scr") or open_sym
     st.download_button("⬇️ CSV", d.to_csv(index=False).encode(), f"accumulation_{asof:%Y%m%d}.csv", "text/csv")
 
-# ---------------------------- Tab 2: Sector ------------------------------- #
 with tab2:
     try:
         sec = E.sector_rotation(pool)
@@ -670,7 +664,6 @@ with tab2:
             st.markdown(f"#### {chosen} — {len(sd)} stocks")
             open_sym = stock_table(sd, "sec", height=420) or open_sym
 
-# ---------------------------- Tab 3: Stock Plan --------------------------- #
 with tab3:
     if NEW_LISTINGS:
         with st.expander(f"🆕 Recently listed ({len(NEW_LISTINGS)})", expanded=False):
@@ -679,7 +672,6 @@ with tab3:
     sym = st.selectbox("Stock (type karke search)", ALL_SYMS, index=idx)
     render_detail(sym, "tab")
 
-# ---------------------------- Tab 4: Compare ------------------------------ #
 with tab4:
     pick = st.multiselect("Select up to 4 stocks", ALL_SYMS,
                           default=[s for s in ["BAJAJHFL","BAJFINANCE"] if s in ALL_SYMS],
@@ -706,11 +698,9 @@ with tab4:
                           "Close_vs_Avg","Bulk_Flag","Bulk_Net_Cr"] if c in scr.columns]
         st.dataframe(scr[scr.Symbol.isin(pick)][cc], hide_index=True, width="stretch")
 
-# ---------------------------- Tab 5: Bulk/Block --------------------------- #
 with tab5:
     if DEALS_STALE:
-        st.warning(f"⚠️ Aaj ke bulk/block deals NSE pe abhi publish nahi hue. "
-                   f"Last available: {DEALS_DATE}")
+        st.warning(f"⚠️ Aaj ke bulk/block deals NSE pe abhi publish nahi hue. Last: {DEALS_DATE}")
     if deals is None or deals.empty:
         st.info("Bulk/block deals NSE se load nahi ho paye. ~6-7 PM IST ke baad try karo.")
     else:
@@ -733,7 +723,6 @@ with tab5:
                                     "Qty": st.column_config.NumberColumn(format="%d"),
                                     "Price": st.column_config.NumberColumn(format="₹%.2f")})
 
-# ---------------------------- Tab 6: Market Breadth ----------------------- #
 with tab6:
     st.markdown("### 🌊 Market Breadth + Nifty Trend")
     if not breadth:
@@ -769,9 +758,9 @@ with tab6:
         if nifty_snap:
             st.markdown(f"**Nifty 50 (Yahoo):** ₹{nifty_snap['price']:,.2f}  |  "
                         f"1D {nifty_snap.get('chg_1d',0):+.2f}%  |  "
-                        f"1W {nifty_snap.get('ret_1w',0) or 0:+.2f}%  |  "
-                        f"1M {nifty_snap.get('ret_1m',0) or 0:+.2f}%  |  "
-                        f"3M {nifty_snap.get('ret_3m',0) or 0:+.2f}%")
+                        f"1W {nifty_snap.get('ret_1w') or 0:+.2f}%  |  "
+                        f"1M {nifty_snap.get('ret_1m') or 0:+.2f}%  |  "
+                        f"3M {nifty_snap.get('ret_3m') or 0:+.2f}%")
             st.markdown(f"20DMA ₹{nifty_snap.get('dma20','-')}  |  "
                         f"50DMA ₹{nifty_snap.get('dma50','-')}  |  "
                         f"200DMA ₹{nifty_snap.get('dma200','-')}  |  "
@@ -793,7 +782,6 @@ with tab6:
         else:
             st.info("Insider trading data aaj available nahi hai.")
 
-# ---------------------------- Tab 7: Position Sizing ---------------------- #
 with tab7:
     st.markdown("### 💰 Position Sizing Calculator")
     st.caption("Capital + Risk % + Entry + SL → kitne shares kharido, max loss kitna.")
@@ -847,7 +835,6 @@ with tab7:
                 kpi(tc[i], f"{name} ₹{tp:.2f}", f"+₹{profit:,.0f}", f"R:R {rr:.1f}x", "g")
         st.caption("⚠️ Ye ek calculator hai, recommendation nahi.")
 
-# ---------------------------- Tab 8: Telegram ----------------------------- #
 with tab8:
     st.markdown("### 🔔 Telegram Alerts")
     st.caption("Do tarike: (1) GitHub Actions daily bhejega, (2) App me manual 'Send now'.")
@@ -882,10 +869,9 @@ with tab8:
         st.markdown("""
 **Setup (ek baar):**
 1. GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**
-2. Add karo: `TELEGRAM_TOKEN` = tumhara bot token
-3. Add karo: `TELEGRAM_CHAT_ID` = tumhara chat id
-4. `.github/workflows/bhavcopy.yml` roz chalega (config ke hisaab se)
-5. Roz ~7 PM IST pe Telegram pe alert aa jayega automatically
+2. Add: `TELEGRAM_TOKEN` = bot token
+3. Add: `TELEGRAM_CHAT_ID` = chat id
+4. `.github/workflows/bhavcopy.yml` roz 7 PM IST pe auto chalega
         """)
 
 if open_sym:
