@@ -218,7 +218,7 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
 
     rows = []
     for sym, g in hist.groupby("Symbol", sort=False):
-         g = _adjust_splits(g)
+        g = _adjust_splits(g)
         if len(g) < 5:
             continue
         is_new_listing = len(g) < 20
