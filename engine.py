@@ -1,7 +1,14 @@
 """
-engine.py - Smart Money Terminal data engine
-Auto-downloads NSE bhavcopy + delivery data, computes accumulation metrics.
-Also tracks re-entries via local SQLite (signals_log.db) - fully automatic.
+engine.py - Smart Money Terminal data engine (v2 - fixed filters)
+Fix list:
+  1. Fresh spike: aaj ka delivery % uske 3M avg se 5pp+ zyada hona chahiye (pehle 5% abs tha)
+  2. Entry zone setup ke hisaab se (Breakout / In range / Trending alag alag)
+  3. SL cap 10% max (wide range wale stocks me R:R theek rahe)
+  4. Split/bonus detection robust (DELIV_QTY jump bhi check)
+  5. Split-affected stocks alag flag (Score/Net_Flow unreliable badge)
+  6. Buy_weeks ab calendar week (Mon-Sun) pe, 5-day rolling nahi
+  7. 30D range me last 2 din exclude (breakout day range auto-expand nahi karega)
+  8. Net_Flow comment clear: ye PROXY hai, actual buyer identity nahi
 """
 import os
 import sqlite3
@@ -106,7 +113,6 @@ def fetch_history(days=80):
     frames = []
     got = 0
     errs = 0
-
     for i in range(days * 2 + 15):
         d = today - timedelta(days=i)
         if d.weekday() >= 5:
@@ -183,25 +189,58 @@ def fetch_sector_map():
     return dict(SECTOR_OF)
 
 
-# ============ SPLIT ADJUST ============ #
-def _adjust_splits(g):
+# ============ SPLIT ADJUST (v2 - robust) ============ #
+def _detect_split_events(g):
+    """
+    Detect split/bonus days within a symbol's history.
+    Two signals:
+      A. PREV_CLOSE vs prior CLOSE ratio (ex-date adjustment by NSE)
+      B. DELIV_QTY sudden 3x+ jump on down day (data scale change)
+    Returns list of index positions where split happened (0-based into g).
+    """
     if g is None or len(g) < 2:
-        return g
+        return []
     g = g.sort_values("Date").reset_index(drop=True).copy()
+    events = []
+    prev_close = g["PREV_CLOSE"].astype(float).values
+    close = g["CLOSE_PRICE"].astype(float).values
+    dq = g["DELIV_QTY"].fillna(0).astype(float).values
+    for i in range(1, len(g)):
+        # Signal A: NSE adjusted prev_close vs prior actual close
+        if close[i-1] > 0 and prev_close[i] > 0:
+            r = prev_close[i] / close[i-1]
+            if r > 1.5 or (0 < r < 0.67):
+                events.append(i)
+                continue
+        # Signal B: DELIV_QTY jumped 3x+ while price dropped
+        if dq[i] > 0 and dq[i-1] > 0 and close[i] < close[i-1]:
+            if dq[i] / dq[i-1] > 3.0:
+                events.append(i)
+    return events
+
+
+def _adjust_splits(g):
+    """Back-adjust OHLC & volumes within symbol history for splits/bonus."""
+    if g is None or len(g) < 2:
+        return g, False
+    g = g.sort_values("Date").reset_index(drop=True).copy()
+    events = _detect_split_events(g)
+    if not events:
+        return g, False
     ratio = g["PREV_CLOSE"].astype(float) / g["CLOSE_PRICE"].astype(float).shift(1)
     cum = np.ones(len(g))
     for i in range(1, len(g)):
         r = ratio.iloc[i]
-        if pd.notna(r) and (r > 1.5 or (r > 0 and r < 0.67)):
+        if pd.notna(r) and (r > 1.5 or (0 < r < 0.67)):
             cum[:i] = cum[:i] / r
     for col in ["OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE", "PREV_CLOSE"]:
         g[col] = g[col] * cum
     for col in ["DELIV_QTY", "TTL_TRD_QNTY"]:
         g[col] = g[col] / cum
-    return g
+    return g, True
 
 
-# ============ SCREENER ============ #
+# ============ SCREENER (v2 - fixed) ============ #
 def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
     if hist is None or hist.empty:
         return pd.DataFrame()
@@ -210,18 +249,16 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
     hist = hist.dropna(subset=["Date", "Symbol", "CLOSE_PRICE"])
     if hist.empty:
         return pd.DataFrame()
-    all_dates = sorted(hist.Date.unique())
-    if len(all_dates) < 25:
-        return pd.DataFrame()
     if sector_map is None:
         sector_map = {}
 
     rows = []
     for sym, g in hist.groupby("Symbol", sort=False):
-        g = _adjust_splits(g)
+        g, had_split = _adjust_splits(g)
         if len(g) < 5:
             continue
         is_new_listing = len(g) < 20
+
         c = g["CLOSE_PRICE"].astype(float).values
         h = g["HIGH_PRICE"].astype(float).values
         l = g["LOW_PRICE"].astype(float).values
@@ -229,6 +266,7 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         v = g["TTL_TRD_QNTY"].fillna(0).astype(float).values
         dq = g["DELIV_QTY"].fillna(0).astype(float).values
         dp = g["DELIV_PER"].fillna(0).astype(float).values
+        dates = pd.to_datetime(g["Date"].values)
 
         price = c[-1]
         prev = pc[-1] if pc[-1] > 0 else (c[-2] if len(c) > 1 else price)
@@ -250,23 +288,37 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         deliv_per_3m = float(dp_3m.mean()) if len(dp_3m) else 0.0
         deliv_per_chg = deliv_per_1m - deliv_per_3m
 
+        # Net flow: PROXY metric. Up-day delivery minus down-day delivery.
+        # Ye actual buyer/seller identity nahi batata. Sirf ek pattern proxy hai.
         up = c_1m > pc_1m; dn = c_1m < pc_1m; tot = dq_1m.sum()
         net_flow_1m = float((dq_1m[up].sum() - dq_1m[dn].sum()) / tot * 100) if tot > 0 else 0.0
         up3 = c_3m > pc_3m; dn3 = c_3m < pc_3m; tot3 = dq_3m.sum()
         net_flow_3m = float((dq_3m[up3].sum() - dq_3m[dn3].sum()) / tot3 * 100) if tot3 > 0 else 0.0
 
+        # FIX 6: Buy weeks - actual calendar weeks (Mon-Sun)
         buy_weeks = 0
-        for w in range(4):
-            we = n - w * 5; ws = max(0, we - 5)
-            if ws >= we: break
-            wc = c[ws:we]; wpc = pc[ws:we]; wd = dq[ws:we]
-            if wd[wc > wpc].sum() > wd[wc < wpc].sum():
-                buy_weeks += 1
+        try:
+            df_w = pd.DataFrame({"Date": dates, "C": c, "PC": pc, "DQ": dq})
+            df_w = df_w.dropna()
+            if not df_w.empty:
+                df_w["Week"] = df_w["Date"].dt.to_period("W")
+                wgroups = list(df_w.groupby("Week"))
+                for wk, grp in wgroups[-4:]:
+                    if grp.DQ[grp.C > grp.PC].sum() > grp.DQ[grp.C < grp.PC].sum():
+                        buy_weeks += 1
+        except Exception:
+            buy_weeks = 0
 
         turnover_cr = float((v[-min(21, n):] * c[-min(21, n):]).sum() / 1e7 / min(21, n))
 
-        lookback = min(30, n)
-        rng_lo = float(l[-lookback:].min()); rng_hi = float(h[-lookback:].max())
+        # FIX 7: 30D range me last 2 din exclude (breakout day range auto-expand na kare)
+        lb_start = max(0, n - 30)
+        lb_end = max(lb_start, n - 2)  # exclude last 2 days
+        if lb_end - lb_start >= 5:
+            rng_lo = float(l[lb_start:lb_end].min())
+            rng_hi = float(h[lb_start:lb_end].max())
+        else:
+            rng_lo = float(l[lb_start:].min()); rng_hi = float(h[lb_start:].max())
         rng_pct = ((rng_hi / rng_lo) - 1) * 100 if rng_lo > 0 else 0.0
 
         low20 = float(l[-min(20, n):].min()); sma20 = float(c[-min(20, n):].mean())
@@ -282,16 +334,41 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         else: setup = "Trending / wide"
         if price < rng_lo: setup = "Breakdown"
 
-        entry = price
-        entry_low = rng_lo * 1.01; entry_high = rng_lo * 1.05
+        # FIX 2: Entry zone per setup type
+        if setup == "Breakout":
+            entry = rng_hi * 1.005
+            entry_low = rng_hi * 1.000
+            entry_high = rng_hi * 1.02
+        elif setup == "In range (base)":
+            entry = (rng_lo + rng_hi) / 2
+            entry_low = rng_lo * 1.01
+            entry_high = rng_lo * 1.05
+        elif setup == "Trending / wide":
+            entry = min(price, sma20)
+            entry_low = entry * 0.98
+            entry_high = entry * 1.02
+        else:  # Breakdown
+            entry = price
+            entry_low = price * 0.98
+            entry_high = price * 1.00
+
         entry_zone = f"{entry_low:,.2f}–{entry_high:,.2f}"
         if entry_low <= price <= entry_high: entry_status = "In zone"
         elif price > entry_high:             entry_status = "Above zone (wait)"
         else:                                entry_status = "Below zone"
         entry_gap = (price / entry - 1) * 100 if entry > 0 else 0.0
 
-        sl = rng_lo * 0.97 if rng_lo > 0 else price * 0.92
+        # FIX 3: SL with 10% cap
+        if setup == "Breakout":
+            sl = min(rng_hi * 0.97, entry * 0.92)
+        elif setup == "In range (base)":
+            sl = max(rng_lo * 0.97, entry * 0.90)
+        else:
+            sl = max(low20 * 0.97, entry * 0.90)
+        if sl <= 0 or sl >= entry:
+            sl = entry * 0.92
         risk_pct = (entry - sl) / entry * 100 if entry > 0 else 0.0
+
         rng_height = rng_hi - rng_lo
         t1 = rng_hi if rng_hi > entry else entry * 1.05
         t2 = t1 + rng_height * 0.5
@@ -310,11 +387,15 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
         last5 = dq[-5:] if n >= 5 else dq
         last5_x = float(last5.mean() / dq_ref) if dq_ref > 0 else 0.0
 
+        # FIX 1: Fresh spike - delivery % aaj apne 3M avg se 5pp+ zyada ho
         fresh = "None"
-        if today_x >= 2 and today_dp >= 5 and today_up:
+        if today_x >= 2 and today_dp >= (deliv_per_3m + 5) and today_up:
             fresh = "Spike today"
-        elif n >= 3 and dq[-3:].mean() >= 2 * dq_ref and today_up:
-            fresh = "Spike (last 3D)"
+        elif n >= 3:
+            r3 = dq[-3:]
+            r3_dp = dp[-3:]
+            if r3.mean() >= 2 * dq_ref and r3_dp.mean() >= (deliv_per_3m + 3) and today_up:
+                fresh = "Spike (last 3D)"
         if fresh == "None" and last5_x >= 1.5 and net_flow_1m > 0:
             fresh = "Building (5D)"
 
@@ -397,6 +478,7 @@ def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
             "Ret_1M": round(ret_1m, 2),
             "Ret_3M": round(ret_3m, 2),
             "Is_New_Listing": bool(is_new_listing),
+            "Has_Split_Adjust": bool(had_split),  # naya flag
         })
 
     scr = pd.DataFrame(rows)
@@ -494,7 +576,7 @@ def sector_rotation(pool: pd.DataFrame) -> pd.DataFrame:
     return g[cols].sort_values(["Flow_Chg", "Flow_1M"], ascending=False).reset_index(drop=True)
 
 
-# ============ RE-ENTRY TRACKER (SQLite) ============ #
+# ============ RE-ENTRY TRACKER ============ #
 def _init_tracker_db():
     try:
         con = sqlite3.connect(DB_PATH, timeout=10)
@@ -519,7 +601,6 @@ def _init_tracker_db():
 
 
 def update_sl_hits(hist):
-    """Mark SL hit for open entries by checking intraday lows after run_date."""
     if hist is None or hist.empty:
         return
     try:
@@ -554,7 +635,6 @@ def update_sl_hits(hist):
 
 
 def reentry_stats(scr, asof_date, window_days=120):
-    """Enrich screener with re-entry history from past logs."""
     if scr is None or scr.empty:
         return scr
     try:
@@ -588,12 +668,9 @@ def reentry_stats(scr, asof_date, window_days=120):
     m["Appearances_120D"] = m["Past_Appearances"] + 1
 
     def _flag(r):
-        if r.Past_Appearances == 0:
-            return "🆕 First time"
-        if r.SL_Hit_Ever == 1:
-            return "🔁 SL hit earlier"
-        if r.Past_Appearances >= 3:
-            return "🔁 Repeat"
+        if r.Past_Appearances == 0: return "🆕 First time"
+        if r.SL_Hit_Ever == 1: return "🔁 SL hit earlier"
+        if r.Past_Appearances >= 3: return "🔁 Repeat"
         return "🔁 Second chance"
 
     m["Reentry"] = m.apply(_flag, axis=1)
@@ -608,7 +685,6 @@ def reentry_stats(scr, asof_date, window_days=120):
 
 
 def log_screener_run(scr, asof_date):
-    """Save today's picks into DB (idempotent per day)."""
     if scr is None or scr.empty:
         return
     try:
@@ -637,7 +713,6 @@ def log_screener_run(scr, asof_date):
 
 
 def reentry_history(symbol, limit=20):
-    """Return past log entries for a symbol (newest first)."""
     try:
         _init_tracker_db()
         con = sqlite3.connect(DB_PATH, timeout=10)
