@@ -1,473 +1,462 @@
 """
-engine.py - Delivery-based accumulation engine (NSE bhavcopy)
-Source: NSE sec_bhavdata_full_DDMMYYYY.csv (price, volume, delivery qty, delivery %)
+engine.py - Smart Money Terminal data engine
+Auto-downloads NSE bhavcopy + delivery data, computes accumulation metrics.
+Also tracks re-entries via local SQLite (signals_log.db) - fully automatic.
 """
-from __future__ import annotations
-import numpy as np
-import datetime as dt
-import io
 import os
-import re
-from concurrent.futures import ThreadPoolExecutor
-from zoneinfo import ZoneInfo
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from io import StringIO
 
+import numpy as np
 import pandas as pd
 import requests
 
-IST = ZoneInfo("Asia/Kolkata")
-CACHE_DIR = os.path.join("data", "bhav")
-URLS = [
-    "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{d}.csv",
-    "https://archives.nseindia.com/products/content/sec_bhavdata_full_{d}.csv",
-]
+# ============ CONFIG ============ #
+IST = timezone(timedelta(hours=5, minutes=30))
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join(_BASE_DIR, ".nse_cache")
+DB_PATH = os.path.join(_BASE_DIR, "signals_log.db")
+try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+except Exception:
+    pass
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-    "Accept": "text/csv,*/*",
-    "Referer": "https://www.nseindia.com/",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120 Safari/537.36"),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
-# NSE symbols (no .NS). Edit freely or add more from the app sidebar.
-WATCHLIST = {
-    "Bank": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "INDUSINDBK"],
-    "PSU Bank": ["SBIN", "BANKBARODA", "PNB", "CANBK", "UNIONBANK"],
-    "Fin Services": ["BAJFINANCE", "BAJAJFINSV", "BAJAJHFL", "SBILIFE", "HDFCLIFE", "CHOLAFIN",
-                     "LICHSGFIN", "PNBHOUSING", "CANFINHOME"],
-    "IT": ["TCS", "INFY", "HCLTECH", "WIPRO", "TECHM", "LTIM"],
-    "Pharma": ["SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "LUPIN", "AUROPHARMA"],
-    "Auto": ["MARUTI", "M&M", "BAJAJ-AUTO", "EICHERMOT", "HEROMOTOCO", "TVSMOTOR"],
-    "FMCG": ["HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "DABUR", "GODREJCP"],
-    "Metal": ["TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "JINDALSTEL", "NMDC"],
-    "Energy": ["RELIANCE", "ONGC", "NTPC", "POWERGRID", "COALINDIA", "BPCL"],
-    "Realty": ["DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE", "LODHA"],
-    "Infra": ["LT", "ADANIPORTS", "SIEMENS", "ULTRACEMCO", "GRASIM"],
-    "Media": ["SUNTV", "PVRINOX", "ZEEL"],
+FRESH_SET = {"Spike today", "Spike (last 3D)", "Building (5D)"}
+
+SECTOR_OF = {
+    "RELIANCE": "Oil Gas & Consumable Fuels", "TCS": "Information Technology",
+    "HDFCBANK": "Financial Services", "INFY": "Information Technology",
+    "ICICIBANK": "Financial Services", "HINDUNILVR": "FMCG",
+    "SBIN": "Financial Services", "BHARTIARTL": "Telecommunication",
+    "ITC": "FMCG", "KOTAKBANK": "Financial Services", "LT": "Construction",
+    "AXISBANK": "Financial Services", "BAJFINANCE": "Financial Services",
+    "BAJAJHFL": "Financial Services", "ASIANPAINT": "Consumer Durables",
+    "MARUTI": "Automobile", "BAJAJFINSV": "Financial Services",
+    "TITAN": "Consumer Durables", "SUNPHARMA": "Pharmaceuticals",
+    "ULTRACEMCO": "Cement", "WIPRO": "Information Technology",
+    "NESTLEIND": "FMCG", "TATAMOTORS": "Automobile", "NTPC": "Power",
+    "POWERGRID": "Power", "M&M": "Automobile", "TATASTEEL": "Metals",
+    "JSWSTEEL": "Metals", "ADANIENT": "Diversified", "ADANIPORTS": "Services",
+    "COALINDIA": "Mining", "HCLTECH": "Information Technology",
+    "TECHM": "Information Technology", "INDUSINDBK": "Financial Services",
+    "GRASIM": "Cement", "HINDALCO": "Metals", "DRREDDY": "Pharmaceuticals",
+    "CIPLA": "Pharmaceuticals", "DIVISLAB": "Pharmaceuticals",
+    "BRITANNIA": "FMCG", "EICHERMOT": "Automobile", "HEROMOTOCO": "Automobile",
+    "APOLLOHOSP": "Healthcare", "SBILIFE": "Financial Services",
+    "HDFCLIFE": "Financial Services", "BPCL": "Oil Gas & Consumable Fuels",
+    "IOC": "Oil Gas & Consumable Fuels", "ONGC": "Oil Gas & Consumable Fuels",
+    "SHREECEM": "Cement", "PIDILITIND": "Chemicals", "DMART": "Retail",
+    "GODREJCP": "FMCG", "HAVELLS": "Consumer Durables", "DABUR": "FMCG",
+    "MARICO": "FMCG", "COLPAL": "FMCG", "BERGEPAINT": "Consumer Durables",
+    "SIEMENS": "Capital Goods", "BOSCHLTD": "Automobile",
+    "LTIM": "Information Technology",
 }
-SECTOR_OF = {s: sec for sec, lst in WATCHLIST.items() for s in lst}
-
-# ETFs / liquid & debt funds also trade in NSE "EQ" series - exclude them.
-# Add any leftover symbol here to hide it permanently.
-EXCLUDE = {"GOLDSHARE", "AXISGOLD", "SBIGOLD", "KOTAKGOLD", "TATAGOLD", "HDFCGOLD", "LICMFGOLD",
-           "SILVERIETF", "CPSEETF", "GOLD1", "GOLDCASE", "SILVER1"}
-_FUND_RE = re.compile(r"(BEES|ETF|LIQUID|GILT|NIFTY|SENSEX|NEXT50|MON100|MOM100|LOWVOL|QUAL30|"
-                      r"MOVALUE|MOSMALL|MAFANG|MOMENTUM|MID150|SMALL250|TOP100|OVERNIGHT)")
 
 
-def is_fund(sym: str) -> bool:
-    return sym in EXCLUDE or bool(_FUND_RE.search(sym))
+# ============ HELPERS ============ #
+def now_ist():
+    return datetime.now(IST)
 
 
-COLS = ["SYMBOL", "Date", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE",
-        "TTL_TRD_QNTY", "TURNOVER_LACS", "DELIV_QTY", "DELIV_PER"]
+def _bhav_url(dt):
+    return f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{dt:%d%m%Y}.csv"
 
 
-def now_ist() -> dt.datetime:
-    return dt.datetime.now(IST)
-
-
-# --------------------------------------------------------------------------- #
-# Download (parallel, cached per day on disk)
-# --------------------------------------------------------------------------- #
-def _parse(text: str) -> pd.DataFrame:
-    df = pd.read_csv(io.StringIO(text), skipinitialspace=True)
-    df.columns = [c.strip() for c in df.columns]
-    df = df[df["SERIES"].astype(str).str.strip() == "EQ"].copy()
-    df["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
-    df["Date"] = pd.to_datetime(df["DATE1"].astype(str).str.strip(), format="%d-%b-%Y")
-    for c in COLS[2:]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df[COLS]
-
-
-def _get_day(day: dt.date):
-    """Returns (day, DataFrame|None, status)  status: ok | holiday | error"""
-    path = os.path.join(CACHE_DIR, f"{day:%Y%m%d}.csv")
-    miss = path + ".none"
-    if os.path.exists(path):
-        return day, pd.read_csv(path, parse_dates=["Date"]), "ok"
-    if os.path.exists(miss):
-        return day, None, "holiday"
-    stamp = f"{day:%d%m%Y}"
-    saw_404 = False
-    for url in URLS:
+def _fetch_bhav_day(dt):
+    fp = os.path.join(CACHE_DIR, f"sec_bhav_{dt:%Y%m%d}.csv")
+    if os.path.exists(fp):
         try:
-            r = requests.get(url.format(d=stamp), headers=HEADERS, timeout=25)
-            if r.status_code == 200 and len(r.text) > 5000:
-                df = _parse(r.text)
-                os.makedirs(CACHE_DIR, exist_ok=True)
-                df.to_csv(path, index=False)
-                return day, df, "ok"
-            if r.status_code == 404:
-                saw_404 = True
+            df = pd.read_csv(fp)
+            if not df.empty:
+                return df
         except Exception:
-            continue
-    if saw_404:
-        if day < now_ist().date():  # old 404 = market holiday, remember it
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            open(miss, "w").close()
-        return day, None, "holiday"
-    return day, None, "error"
-
-
-def fetch_history(sessions: int = 80):
-    today = now_ist().date()
-    days = [today - dt.timedelta(days=i) for i in range(0, 135)]
-    days = [d for d in days if d.weekday() < 5]
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        res = list(ex.map(_get_day, days))
-    frames = [df for _, df, s in res if s == "ok" and df is not None]
-    errors = sum(1 for _, _, s in res if s == "error")
-    if not frames:
-        return pd.DataFrame(), {"days": 0, "errors": errors}
-    hist = pd.concat(frames, ignore_index=True)
-    keep = sorted(hist.Date.unique())[-sessions:]
-    hist = hist[hist.Date.isin(keep)].sort_values(["SYMBOL", "Date"]).reset_index(drop=True)
-    return hist, {"days": len(keep), "errors": errors}
-
-
-# --------------------------------------------------------------------------- #
-# Corporate action adjustment (splits / bonus) - otherwise delivery qty jumps
-# --------------------------------------------------------------------------- #
-SECTOR_URLS = [
-    "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
-    "https://nsearchives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv",
-]
-SECTOR_FILE = os.path.join("data", "sector_map.csv")
-
-
-def fetch_sector_map() -> dict:
-    """Symbol -> NSE Industry (Nifty 500 + Microcap 250 = ~750 stocks). Cached 7 days on disk."""
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+    url = _bhav_url(dt)
     try:
-        if os.path.exists(SECTOR_FILE) and (dt.datetime.now().timestamp() - os.path.getmtime(SECTOR_FILE)) < 7 * 86400:
-            m = pd.read_csv(SECTOR_FILE)
-            return dict(zip(m.Symbol, m.Industry))
-    except Exception:
-        pass
-    frames = []
-    for url in SECTOR_URLS:
+        r = requests.get(url, headers=HEADERS, timeout=25)
+        if r.status_code != 200 or len(r.text) < 200:
+            return None
+        df = pd.read_csv(StringIO(r.text))
+        if df.empty:
+            return None
+        df.columns = [str(c).strip() for c in df.columns]
         try:
-            r = requests.get(url, headers=HEADERS, timeout=25)
-            if r.status_code == 200:
-                df = pd.read_csv(io.StringIO(r.text))
-                df.columns = [c.strip() for c in df.columns]
-                frames.append(df[["Symbol", "Industry"]])
+            df.to_csv(fp, index=False)
+        except Exception:
+            pass
+        return df
+    except Exception:
+        return None
+
+
+# ============ HISTORY ============ #
+def fetch_history(days=80):
+    today = now_ist().date()
+    frames = []
+    got = 0
+    errs = 0
+
+    for i in range(days * 2 + 15):
+        d = today - timedelta(days=i)
+        if d.weekday() >= 5:
+            continue
+        df = _fetch_bhav_day(d)
+        if df is None or df.empty:
+            errs += 1
+            continue
+        df.columns = [str(c).strip() for c in df.columns]
+        date_col = None
+        for c in ("DATE1", "DATE", "TIMESTAMP"):
+            if c in df.columns:
+                date_col = c
+                break
+        need = {"SYMBOL", "SERIES", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE",
+                "LOW_PRICE", "CLOSE_PRICE", "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"}
+        if not need.issubset(df.columns) or date_col is None:
+            errs += 1
+            continue
+        df = df[df["SERIES"].astype(str).str.strip().isin(["EQ", "BE"])].copy()
+        df["Symbol"] = df["SYMBOL"].astype(str).str.strip()
+        df["Date"] = pd.to_datetime(df[date_col], errors="coerce")
+        for c in ["PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE",
+                  "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=["Date", "CLOSE_PRICE", "Symbol"])
+        if df.empty:
+            errs += 1
+            continue
+        frames.append(df[["Date", "Symbol", "PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE",
+                          "LOW_PRICE", "CLOSE_PRICE", "TTL_TRD_QNTY", "DELIV_QTY", "DELIV_PER"]])
+        got += 1
+        if got >= days:
+            break
+
+    if not frames:
+        return pd.DataFrame(), {"days": 0, "errors": errs}
+
+    hist = pd.concat(frames, ignore_index=True)
+    hist = (hist.drop_duplicates(subset=["Date", "Symbol"])
+                .sort_values(["Date", "Symbol"]).reset_index(drop=True))
+    hist = hist[~hist.Symbol.str.contains(
+        r"(NIFTY|BEES|ETF|GOLD|SILVER|LIQUID|GSEC|SDL|E-GOLD)", case=False, na=False)]
+    mask = hist.DELIV_PER.isna() & hist.TTL_TRD_QNTY.gt(0)
+    hist.loc[mask, "DELIV_PER"] = (hist.loc[mask, "DELIV_QTY"]
+                                    / hist.loc[mask, "TTL_TRD_QNTY"] * 100).round(2)
+    return hist, {"days": int(hist.Date.nunique()), "errors": int(errs)}
+
+
+# ============ SECTOR MAP ============ #
+def fetch_sector_map():
+    urls = [
+        "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+        "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200 or len(r.text) < 100:
+                continue
+            df = pd.read_csv(StringIO(r.text))
+            if df.empty:
+                continue
+            df.columns = [str(c).strip() for c in df.columns]
+            sym_c = next((c for c in df.columns if c.lower() == "symbol"), None)
+            ind_c = next((c for c in df.columns if c.lower() in ("industry", "sector",
+                                                                  "basic industry")), None)
+            if not sym_c or not ind_c:
+                continue
+            return dict(zip(df[sym_c].astype(str).str.strip().str.upper(),
+                            df[ind_c].astype(str).str.strip()))
         except Exception:
             continue
-    if frames:
-        m = pd.concat(frames).drop_duplicates("Symbol")
-        m["Symbol"] = m.Symbol.astype(str).str.strip()
-        os.makedirs("data", exist_ok=True)
-        m.to_csv(SECTOR_FILE, index=False)
-        return dict(zip(m.Symbol, m.Industry))
-    try:  # stale cache is better than nothing
-        m = pd.read_csv(SECTOR_FILE)
-        return dict(zip(m.Symbol, m.Industry))
-    except Exception:
-        return {}
+    return dict(SECTOR_OF)
 
 
-PRICE_COLS = ["PREV_CLOSE", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE"]
-QTY_COLS = ["TTL_TRD_QNTY", "DELIV_QTY"]
-
-
-def session_pos(hist: pd.DataFrame) -> pd.Series:
-    idx = pd.DatetimeIndex(sorted(hist.Date.unique()))
-    return pd.Series(range(len(idx)), index=idx)
-
-
-def adjust_splits(g: pd.DataFrame, pos: pd.Series) -> pd.DataFrame:
-    """NSE's PREV_CLOSE is already adjusted on ex-date. A big gap between PREV_CLOSE and the
-    previous row's CLOSE (on consecutive sessions) = split/bonus -> back-adjust history."""
-    g = g.copy()
-    f = g.PREV_CLOSE / g.CLOSE_PRICE.shift(1)
-    consec = g.Date.map(pos).diff() == 1
-    ev = consec & ((f < 0.9) | (f > 1.1))
-    if not ev.any():
+# ============ SPLIT ADJUST ============ #
+def _adjust_splits(g):
+    if g is None or len(g) < 2:
         return g
-    factor = pd.Series(1.0, index=g.index)
-    factor[ev] = f[ev]
-    rev = factor.shift(-1).fillna(1.0)[::-1].cumprod()[::-1]
-    for c in PRICE_COLS:
-        g[c] = g[c] * rev
-    for c in QTY_COLS:
-        g[c] = g[c] / rev
+    g = g.sort_values("Date").reset_index(drop=True).copy()
+    ratio = g["PREV_CLOSE"].astype(float) / g["CLOSE_PRICE"].astype(float).shift(1)
+    cum = np.ones(len(g))
+    for i in range(1, len(g)):
+        r = ratio.iloc[i]
+        if pd.notna(r) and (r > 1.5 or (r > 0 and r < 0.67)):
+            cum[:i] = cum[:i] / r
+    for col in ["OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE", "PREV_CLOSE"]:
+        g[col] = g[col] * cum
+    for col in ["DELIV_QTY", "TTL_TRD_QNTY"]:
+        g[col] = g[col] / cum
     return g
 
 
-def symbol_view(hist: pd.DataFrame, sym: str) -> pd.DataFrame:
-    g = hist[hist.SYMBOL == sym].sort_values("Date")
-    return adjust_splits(g, session_pos(hist))
+# ============ SCREENER ============ #
+def compute_screener(hist, sector_filter, min_turnover_cr, sector_map):
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    hist = hist.copy()
+    hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
+    hist = hist.dropna(subset=["Date", "Symbol", "CLOSE_PRICE"])
+    if hist.empty:
+        return pd.DataFrame()
+    all_dates = sorted(hist.Date.unique())
+    if len(all_dates) < 25:
+        return pd.DataFrame()
+    if sector_map is None:
+        sector_map = {}
 
-
-# --------------------------------------------------------------------------- #
-# Delivery flow helpers
-# --------------------------------------------------------------------------- #
-RECENT, BASE = 21, 42      # last 1 month vs the 2 months before it (3 months total)
-
-
-def _flow(df: pd.DataFrame) -> float:
-    """Net delivered qty: delivery on up-days minus delivery on down-days."""
-    up, dn = df.CLOSE_PRICE > df.PREV_CLOSE, df.CLOSE_PRICE < df.PREV_CLOSE
-    return float(df.DELIV_QTY[up].sum() - df.DELIV_QTY[dn].sum())
-
-
-def weekly_flows(g: pd.DataFrame, weeks: int = 12) -> list[tuple]:
-    out, n = [], len(g)
-    for k in range(weeks - 1, -1, -1):
-        seg = g.iloc[max(0, n - 5 * (k + 1)): n - 5 * k]
-        if len(seg):
-            out.append((seg.Date.iloc[-1], _flow(seg)))
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# Trade plan: range / base based (smart-money style), ATR fallback
-# --------------------------------------------------------------------------- #
-def _atr(g: pd.DataFrame) -> float:
-    c, h, l = g.CLOSE_PRICE, g.HIGH_PRICE, g.LOW_PRICE
-    pc = c.shift(1)
-    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
-    return float(tr.tail(14).mean())
-
-
-def _finish(lo, hi, sl, t1, t2, t3, status, extra=None):
-    entry = (lo + hi) / 2
-    risk = entry - sl
-    if risk / entry > 0.10:                      # cap very wide stops at 10%
-        sl, risk = entry * 0.90, entry * 0.10
-        status += " | SL capped at 10%"
-    t1 = max(t1, entry + 1.0 * risk)
-    t2 = max(t2, entry + 2.0 * risk, t1 * 1.005)
-    t3 = max(t3, entry + 3.5 * risk, t2 * 1.005)
-    out = {"Entry_Low": round(lo, 2), "Entry_High": round(hi, 2), "Entry": round(entry, 2),
-           "SL": round(sl, 2), "Risk_Pct": round(risk / entry * 100, 2),
-           "T1": round(t1, 2), "T2": round(t2, 2), "T3": round(t3, 2), "Plan_Status": status}
-    out.update(extra or {})
-    return out
-
-
-def _ret(c: pd.Series, n: int) -> float:
-    return round(float((c.iloc[-1] / c.iloc[-1 - n] - 1) * 100), 1) if len(c) > n else float("nan")
-
-
-def make_plan(g, setup, hi_c, lo_c, lo_low) -> dict:
-    atr = _atr(g)
-    close = float(g.CLOSE_PRICE.iloc[-1])
-    dma20 = float(g.CLOSE_PRICE.tail(20).mean())
-    h = hi_c - lo_c
-    extra = {"ATR": round(atr, 2)}
-
-    if setup == "In range (base)" and h > 0:
-        p = (close - lo_c) / h
-        if p <= 0.6:
-            lo, hi = max(lo_c, close - 0.5 * atr), close
-            status = "Buy within range (near support)"
-        else:
-            lo, hi = lo_c + 0.3 * h, lo_c + 0.5 * h
-            status = f"Near range top - buy dip, or breakout above Rs {hi_c * 1.005:.2f}"
-        sl = lo_low - 0.25 * atr
-        return _finish(lo, hi, sl, hi_c, hi_c + 0.5 * h, hi_c + 1.0 * h, status, extra)
-
-    if setup == "Breakout" and h > 0:
-        if close > hi_c * 1.05:
-            lo, hi = hi_c, hi_c + 0.5 * atr
-            status = f"Extended after breakout - wait for retest of Rs {hi_c:.2f}"
-        else:
-            lo, hi = hi_c, max(close, hi_c + 0.1 * atr)
-            status = f"Fresh breakout - buy near/after retest of Rs {hi_c:.2f}"
-        sl = max(hi_c - 1.2 * atr, lo_low)
-        return _finish(lo, hi, sl, hi_c + 0.5 * h, hi_c + 1.0 * h, hi_c + 1.5 * h, status, extra)
-
-    # fallback: plain ATR plan
-    swing = float(g.LOW_PRICE.tail(10).min())
-    if close > dma20 * 1.06:
-        lo, hi, status = dma20, dma20 + 0.5 * atr, "No clear range, extended - wait for pullback to 20 DMA"
-    else:
-        lo, hi, status = close - 0.5 * atr, close, "No clear range - ATR plan"
-    entry = (lo + hi) / 2
-    sl = min(swing, entry - 1.5 * atr)
-    risk = entry - sl
-    return _finish(lo, hi, sl, entry + 1.5 * risk, entry + 2.5 * risk, entry + 4.0 * risk, status, extra)
-
-
-# --------------------------------------------------------------------------- #
-# Screener: last 1 month vs previous 2 months
-# --------------------------------------------------------------------------- #
-def compute_screener(hist: pd.DataFrame, extra: tuple = (), min_turnover_cr: float = 0.0,
-                     sector_map: dict | None = None) -> pd.DataFrame:
-    sectors = sector_map or {}
-    pos = session_pos(hist)
-    watch = set(SECTOR_OF) | set(extra)
     rows = []
-    for sym, g in hist.groupby("SYMBOL", sort=False):
-        if len(g) < RECENT + BASE or is_fund(sym):
+    for sym, g in hist.groupby("Symbol", sort=False):
+        g = _adjust_splits(g)
+        if len(g) < 20:
             continue
-        g = adjust_splits(g.sort_values("Date"), pos)
-        c = g.CLOSE_PRICE
-        r = c.pct_change()
-        if r.tail(63).abs().max() > 0.30:        # unadjusted corporate action / bad data
-            continue
-        if r.tail(60).std() * 100 < 0.4:         # liquid / debt funds
-            continue
-        t = g.iloc[-1]
-        if pd.isna(t.DELIV_QTY) or pd.isna(t.DELIV_PER):
-            continue
-        rec, base = g.iloc[-RECENT:], g.iloc[-(RECENT + BASE):-RECENT]
-        turn_cr = g.TURNOVER_LACS.tail(63).mean() / 100
-        if turn_cr < min_turnover_cr and sym not in watch:
-            continue
-        dq_1m, dq_3m = rec.DELIV_QTY.mean(), base.DELIV_QTY.mean()
-        dp_1m, dp_3m = rec.DELIV_PER.mean(), base.DELIV_PER.mean()
-        vol_b = base.TTL_TRD_QNTY.mean()
-        if not (dq_3m > 0 and vol_b > 0) or pd.isna(dp_1m) or pd.isna(dp_3m):
-            continue
-        qty_x, pp = dq_1m / dq_3m, dp_1m - dp_3m
-        today_x = t.DELIV_QTY / dq_3m
-        vol_x = rec.TTL_TRD_QNTY.mean() / vol_b
+        c = g["CLOSE_PRICE"].astype(float).values
+        h = g["HIGH_PRICE"].astype(float).values
+        l = g["LOW_PRICE"].astype(float).values
+        pc = g["PREV_CLOSE"].astype(float).values
+        v = g["TTL_TRD_QNTY"].fillna(0).astype(float).values
+        dq = g["DELIV_QTY"].fillna(0).astype(float).values
+        dp = g["DELIV_PER"].fillna(0).astype(float).values
 
-        # --- fresh activity: catches a sudden accumulation day immediately (1M avg is slow) ---
-        last5 = g.iloc[-5:]
-        x5 = (last5.DELIV_QTY / dq_3m).values
-        up5 = (last5.CLOSE_PRICE >= last5.PREV_CLOSE).values
-        last5_x = float(last5.DELIV_QTY.mean() / dq_3m)
-        pattern = "".join("🟢" if (x >= 1.2 and u) else "🔴" if x >= 1.2 else "⚪" for x, u in zip(x5, up5))
-        if today_x >= 2 and up5[-1] and t.DELIV_PER >= dp_3m + 5:
+        price = c[-1]
+        prev = pc[-1] if pc[-1] > 0 else (c[-2] if len(c) > 1 else price)
+        chg_pct = (price / prev - 1) * 100 if prev else 0.0
+
+        n = len(g)
+        i1m = max(0, n - 21)
+        i3m = max(0, n - 63)
+
+        dq_1m = dq[i1m:]; dq_3m = dq[i3m:i1m]
+        dp_1m = dp[i1m:]; dp_3m = dp[i3m:i1m]
+        c_1m = c[i1m:]; c_3m = c[i3m:i1m]
+        pc_1m = pc[i1m:]; pc_3m = pc[i3m:i1m]
+
+        avg_dq_1m = float(dq_1m.mean()) if len(dq_1m) else 0.0
+        avg_dq_3m = float(dq_3m.mean()) if len(dq_3m) else 0.0
+        deliv_qty_x = avg_dq_1m / avg_dq_3m if avg_dq_3m > 0 else 0.0
+        deliv_per_1m = float(dp_1m.mean()) if len(dp_1m) else 0.0
+        deliv_per_3m = float(dp_3m.mean()) if len(dp_3m) else 0.0
+        deliv_per_chg = deliv_per_1m - deliv_per_3m
+
+        up = c_1m > pc_1m; dn = c_1m < pc_1m; tot = dq_1m.sum()
+        net_flow_1m = float((dq_1m[up].sum() - dq_1m[dn].sum()) / tot * 100) if tot > 0 else 0.0
+        up3 = c_3m > pc_3m; dn3 = c_3m < pc_3m; tot3 = dq_3m.sum()
+        net_flow_3m = float((dq_3m[up3].sum() - dq_3m[dn3].sum()) / tot3 * 100) if tot3 > 0 else 0.0
+
+        buy_weeks = 0
+        for w in range(4):
+            we = n - w * 5; ws = max(0, we - 5)
+            if ws >= we: break
+            wc = c[ws:we]; wpc = pc[ws:we]; wd = dq[ws:we]
+            if wd[wc > wpc].sum() > wd[wc < wpc].sum():
+                buy_weeks += 1
+
+        turnover_cr = float((v[-min(21, n):] * c[-min(21, n):]).sum() / 1e7 / min(21, n))
+
+        lookback = min(30, n)
+        rng_lo = float(l[-lookback:].min()); rng_hi = float(h[-lookback:].max())
+        rng_pct = ((rng_hi / rng_lo) - 1) * 100 if rng_lo > 0 else 0.0
+
+        low20 = float(l[-min(20, n):].min()); sma20 = float(c[-min(20, n):].mean())
+        dist_low = (price / low20 - 1) * 100 if low20 > 0 else 0.0
+        dist_sma = (price / sma20 - 1) * 100 if sma20 > 0 else 0.0
+        if dist_low >= 18 or dist_sma >= 10: stage = "Extended (already ran)"
+        elif dist_low >= 10: stage = "Rally on"
+        elif dist_low >= 5:  stage = "Early move"
+        else:                stage = "Base (not moved)"
+
+        if rng_pct <= 25 and price > rng_hi * 0.99: setup = "Breakout"
+        elif rng_pct <= 25 and rng_lo * 0.98 <= price <= rng_hi * 1.02: setup = "In range (base)"
+        else: setup = "Trending / wide"
+        if price < rng_lo: setup = "Breakdown"
+
+        entry = price
+        entry_low = rng_lo * 1.01; entry_high = rng_lo * 1.05
+        entry_zone = f"{entry_low:,.2f}–{entry_high:,.2f}"
+        if entry_low <= price <= entry_high: entry_status = "In zone"
+        elif price > entry_high:             entry_status = "Above zone (wait)"
+        else:                                entry_status = "Below zone"
+        entry_gap = (price / entry - 1) * 100 if entry > 0 else 0.0
+
+        sl = rng_lo * 0.97 if rng_lo > 0 else price * 0.92
+        risk_pct = (entry - sl) / entry * 100 if entry > 0 else 0.0
+        rng_height = rng_hi - rng_lo
+        t1 = rng_hi if rng_hi > entry else entry * 1.05
+        t2 = t1 + rng_height * 0.5
+        t3 = t1 + rng_height
+        if t2 <= t1: t2 = t1 * 1.05
+        if t3 <= t2: t3 = t2 * 1.05
+
+        plan_status = "Entry zone current range ke andar hai."
+        if price > rng_hi:   plan_status = "Price range ke upar breakout hua hai."
+        elif price < rng_lo: plan_status = "Price range se neeche - wait karo."
+
+        dq_ref = avg_dq_3m if avg_dq_3m > 0 else (avg_dq_1m if avg_dq_1m > 0 else 1.0)
+        today_dq = float(dq[-1]); today_dp = float(dp[-1])
+        today_up = bool(c[-1] > pc[-1])
+        today_x = today_dq / dq_ref if dq_ref > 0 else 0.0
+        last5 = dq[-5:] if n >= 5 else dq
+        last5_x = float(last5.mean() / dq_ref) if dq_ref > 0 else 0.0
+
+        fresh = "None"
+        if today_x >= 2 and today_dp >= 5 and today_up:
             fresh = "Spike today"
-        elif any(x5[i] >= 2 and up5[i] for i in (-4, -3, -2)):
+        elif n >= 3 and dq[-3:].mean() >= 2 * dq_ref and today_up:
             fresh = "Spike (last 3D)"
-        elif last5_x >= 1.5 and _flow(last5) > 0:
+        if fresh == "None" and last5_x >= 1.5 and net_flow_1m > 0:
             fresh = "Building (5D)"
-        else:
-            fresh = "None"
 
-        flow_1m = _flow(rec) / max(rec.DELIV_QTY.sum(), 1)
-        flow_3m = _flow(base) / max(base.DELIV_QTY.sum(), 1)
-        flows = [f for _, f in weekly_flows(g, 4)]
-        buy_weeks = int(sum(f > 0 for f in flows))
-        last_wk = bool(flows and flows[-1] > 0)
-        if buy_weeks >= 3 and last_wk:
-            bstat = "Continuing"
-        elif last_wk:
-            bstat = "Just started"
-        elif buy_weeks >= 2:
-            bstat = "Fading"
-        else:
-            bstat = "Not buying"
+        icons = []
+        for i in range(max(0, n - 5), n):
+            di = dq[i] / dq_ref if dq_ref else 0
+            pi = c[i] > pc[i]
+            if di >= 1.5 and pi:     icons.append("🟢")
+            elif di >= 1.5 and not pi: icons.append("🔴")
+            else:                    icons.append("⚪")
+        last5_str = "".join(icons)
 
-        strong = (rec.DELIV_QTY > dq_3m) & (rec.DELIV_PER > dp_3m)
-        acc_days = int((strong & (rec.CLOSE_PRICE >= rec.PREV_CLOSE)).sum())
-        dist_days = int((strong & (rec.CLOSE_PRICE < rec.PREV_CLOSE)).sum())
+        acc_days = 0; dist_days = 0
+        for i in range(max(0, n - 21), n):
+            di = dq[i] / dq_ref if dq_ref else 0
+            if di >= 1.2 and c[i] > pc[i]:   acc_days += 1
+            elif di >= 1.2 and c[i] < pc[i]: dist_days += 1
 
-        # range / base (last 30 sessions before today)
-        rng = g.iloc[-31:-1]
-        hi_c, lo_c, lo_low = rng.CLOSE_PRICE.max(), rng.CLOSE_PRICE.min(), rng.LOW_PRICE.min()
-        range_pct = (hi_c / lo_c - 1) * 100
-        close = float(t.CLOSE_PRICE)
-        if close > hi_c:
-            setup = "Breakout"
-        elif close < lo_c * 0.99:
-            setup = "Breakdown"
-        elif range_pct <= 25:
-            setup = "In range (base)"
-        else:
-            setup = "Trending / wide"
+        ret_1w = (c[-1] / c[-6] - 1) * 100 if n >= 6 and c[-6] > 0 else 0.0
+        ret_1m = (c[-1] / c[-21] - 1) * 100 if n >= 21 and c[-21] > 0 else 0.0
+        ret_3m = (c[-1] / c[-63] - 1) * 100 if n >= 63 and c[-63] > 0 else 0.0
 
-        dma20 = c.tail(20).mean()
-        run20 = (close / c.tail(20).min() - 1) * 100
-        from_hi = (close / c.tail(60).max() - 1) * 100
-        if run20 >= 18 or close > dma20 * 1.10:
-            stage = "Extended (already ran)"
-        elif run20 >= 10:
-            stage = "Rally on"
-        elif run20 >= 5:
-            stage = "Early move"
-        else:
-            stage = "Base (not moved)"
+        score = 0
+        if deliv_qty_x >= 1.5:   score += 20
+        elif deliv_qty_x >= 1.2: score += 14
+        elif deliv_qty_x >= 1.05: score += 7
+        if deliv_per_chg >= 8:   score += 15
+        elif deliv_per_chg >= 4: score += 10
+        elif deliv_per_chg > 0:  score += 4
+        if net_flow_1m >= 30:    score += 20
+        elif net_flow_1m >= 15:  score += 14
+        elif net_flow_1m > 0:    score += 7
+        if buy_weeks >= 4:       score += 15
+        elif buy_weeks >= 3:     score += 11
+        elif buy_weeks >= 2:     score += 6
+        if setup in ("In range (base)", "Breakout"): score += 10
+        if price >= rng_lo: score += 10
+        if today_dq >= dq_ref: score += 10
 
-        s = 0
-        s += 20 if qty_x >= 1.5 else 14 if qty_x >= 1.2 else 7 if qty_x >= 1.05 else 0
-        s += 15 if pp >= 8 else 10 if pp >= 4 else 4 if pp > 0 else 0
-        s += 20 if flow_1m >= 0.3 else 14 if flow_1m >= 0.15 else 7 if flow_1m > 0 else 0
-        s += 15 if buy_weeks == 4 else 11 if buy_weeks == 3 else 6 if buy_weeks == 2 else 0
-        s += 10 if setup in ("In range (base)", "Breakout") else 0
-        s += 10 if close >= lo_c * 0.99 else 0
-        s += 10 if today_x >= 1 else 0
-        signal = "Strong Accumulation" if s >= 75 else "Accumulation" if s >= 55 else "Neutral"
-        if s < 55 and (dist_days > acc_days or flow_1m < -0.1):
-            signal = "Distribution"
-        if vol_x < 0.5 and signal != "Distribution":
-            signal = "Low volume (ignore)"
+        if score >= 70 and net_flow_1m > 20: signal = "Strong Accumulation"
+        elif score >= 50:                    signal = "Accumulation"
+        elif score >= 30:                    signal = "Neutral"
+        elif net_flow_1m < -15:              signal = "Distribution"
+        else:                                signal = "Low volume (ignore)"
 
-        plan = make_plan(g, setup, hi_c, lo_c, lo_low)
-        if close > plan["Entry_High"] * 1.003:
-            est = "Above zone (wait)"
-        elif close < plan["Entry_Low"] * 0.997:
-            est = "Below zone"
-        else:
-            est = "In zone"
+        if buy_weeks >= 3 and net_flow_1m > 10:     buying_status = "Continuing"
+        elif buy_weeks >= 2 and net_flow_1m > 0:    buying_status = "Just started"
+        elif buy_weeks <= 1 and net_flow_1m < 0:    buying_status = "Not buying"
+        else:                                       buying_status = "Fading"
+
+        sector = sector_map.get(sym, "Unknown")
+
         rows.append({
-            "Symbol": sym, "Sector": sectors.get(sym) or SECTOR_OF.get(sym) or "Other", "Price": round(close, 2),
-            "Chg_Pct": round(float((close / t.PREV_CLOSE - 1) * 100), 2),
-            "Ret_1W": _ret(c, 5), "Ret_1M": _ret(c, 21), "Ret_3M": _ret(c, 62),
-            "Deliv_Per": round(float(t.DELIV_PER), 1), "Deliv_Per_1M": round(float(dp_1m), 1),
-            "Deliv_Per_3M": round(float(dp_3m), 1), "Deliv_Per_Chg": round(float(pp), 1),
-            "Deliv_Qty": int(t.DELIV_QTY), "Deliv_Qty_1M": int(dq_1m), "Deliv_Qty_3M": int(dq_3m),
-            "Deliv_Qty_X": round(float(qty_x), 2), "Today_X": round(float(today_x), 2),
-            "Last5_X": round(last5_x, 2), "Fresh": fresh, "Last5": pattern,
-            "Vol_X": round(float(vol_x), 2),
-            "Net_Flow_1M": round(float(flow_1m) * 100, 0), "Net_Flow_3M": round(float(flow_3m) * 100, 0),
-            "Buy_Weeks": buy_weeks, "Buying_Status": bstat,
-            "Acc_Days": acc_days, "Dist_Days": dist_days,
-            "Setup": setup, "Range_Pct": round(float(range_pct), 1),
-            "Range_Hi": round(float(hi_c), 2), "Range_Lo": round(float(lo_c), 2),
-            "Run_20D": round(float(run20), 1), "From_60D_High": round(float(from_hi), 1), "Stage": stage,
-            "Avg_Turnover_Cr": round(float(turn_cr), 1), "Score": int(s), "Signal": signal,
-            "Entry_Status": est, "Entry_Gap": round((close / plan["Entry"] - 1) * 100, 2),
-            "Entry_Zone": f"{plan['Entry_Low']:.2f} - {plan['Entry_High']:.2f}", **plan,
+            "Symbol": sym, "Sector": sector,
+            "Price": round(price, 2), "Chg_Pct": round(chg_pct, 2),
+            "Deliv_Qty_X": round(deliv_qty_x, 2),
+            "Deliv_Qty_1M": int(avg_dq_1m), "Deliv_Qty_3M": int(avg_dq_3m),
+            "Deliv_Per_1M": round(deliv_per_1m, 1),
+            "Deliv_Per_3M": round(deliv_per_3m, 1),
+            "Deliv_Per_Chg": round(deliv_per_chg, 1),
+            "Net_Flow_1M": round(net_flow_1m, 1),
+            "Net_Flow_3M": round(net_flow_3m, 1),
+            "Score": int(score), "Signal": signal,
+            "Buying_Status": buying_status, "Buy_Weeks": int(buy_weeks),
+            "Fresh": fresh, "Last5": last5_str,
+            "Last5_X": round(last5_x, 2), "Today_X": round(today_x, 2),
+            "Acc_Days": int(acc_days), "Dist_Days": int(dist_days),
+            "Setup": setup, "Stage": stage,
+            "Range_Lo": round(rng_lo, 2), "Range_Hi": round(rng_hi, 2),
+            "Range_Pct": round(rng_pct, 1),
+            "Entry": round(entry, 2),
+            "Entry_Low": round(entry_low, 2), "Entry_High": round(entry_high, 2),
+            "Entry_Zone": entry_zone,
+            "Entry_Status": entry_status, "Entry_Gap": round(entry_gap, 2),
+            "SL": round(sl, 2), "Risk_Pct": round(risk_pct, 2),
+            "T1": round(t1, 2), "T2": round(t2, 2), "T3": round(t3, 2),
+            "Plan_Status": plan_status,
+            "Avg_Turnover_Cr": round(turnover_cr, 2),
+            "Ret_1W": round(ret_1w, 2),
+            "Ret_1M": round(ret_1m, 2),
+            "Ret_3M": round(ret_3m, 2),
         })
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    return df.sort_values(["Score", "Deliv_Qty_X"], ascending=False).reset_index(drop=True)
+
+    scr = pd.DataFrame(rows)
+    if scr.empty:
+        return scr
+    if min_turnover_cr and min_turnover_cr > 0:
+        scr = scr[scr.Avg_Turnover_Cr >= min_turnover_cr]
+    return scr.reset_index(drop=True)
 
 
-# --------------------------------------------------------------------------- #
-# Sector rotation (delivery-flow based): where is money coming in / shifting?
-# --------------------------------------------------------------------------- #
-FRESH_SET = ("Spike today", "Spike (last 3D)", "Building (5D)")
+# ============ SYMBOL VIEW ============ #
+def symbol_view(hist, symbol):
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    g = hist[hist.Symbol == symbol].sort_values("Date").reset_index(drop=True).copy()
+    if g.empty:
+        return g
+    if "DELIV_PER" not in g.columns or g.DELIV_PER.isna().all():
+        g["DELIV_PER"] = (g.DELIV_QTY / g.TTL_TRD_QNTY * 100).round(2)
+    return g
 
 
+# ============ WEEKLY FLOWS ============ #
+def weekly_flows(g, n=12):
+    if g is None or g.empty or "Date" not in g.columns:
+        return []
+    g = g.sort_values("Date").reset_index(drop=True).copy()
+    g["Date"] = pd.to_datetime(g["Date"], errors="coerce")
+    g = g.dropna(subset=["Date"])
+    if g.empty:
+        return []
+    g["Week"] = g.Date.dt.to_period("W").dt.start_time
+    out = []
+    for wk, grp in g.groupby("Week", sort=True):
+        up = grp.CLOSE_PRICE > grp.PREV_CLOSE
+        dn = grp.CLOSE_PRICE < grp.PREV_CLOSE
+        net = float(grp.DELIV_QTY.where(up, 0).sum() - grp.DELIV_QTY.where(dn, 0).sum())
+        out.append((wk, net))
+    return out[-n:]
+
+
+# ============ SECTOR ROTATION ============ #
 def sector_rotation(pool: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate per-stock accumulation metrics to sector level.
-    pool must have: Symbol, Sector, Signal, Net_Flow_1M, Net_Flow_3M.
-    Optional: Buying_Status, Fresh, Deliv_Qty_X, Ret_1W, Ret_1M, Ret_3M.
-    """
     if pool is None or pool.empty:
         return pd.DataFrame()
-
     for c in ["Sector", "Signal", "Net_Flow_1M", "Net_Flow_3M"]:
         if c not in pool.columns:
             return pd.DataFrame()
-
     d = pool.copy()
     d["Sector"] = d["Sector"].fillna("Unknown").astype(str).str.strip()
     d.loc[d.Sector.isin(["", "nan", "None", "NaN"]), "Sector"] = "Unknown"
-
     for c in ["Net_Flow_1M", "Net_Flow_3M", "Deliv_Qty_X", "Ret_1W", "Ret_1M", "Ret_3M"]:
         if c in d.columns:
             d[c] = pd.to_numeric(d[c], errors="coerce")
-
-    acc_signals = {"Accumulation", "Strong Accumulation"}
-    d["_is_acc"]  = d.Signal.isin(acc_signals)
-    d["_is_str"]  = d.Signal.eq("Strong Accumulation")
+    d["_is_acc"] = d.Signal.isin({"Accumulation", "Strong Accumulation"})
+    d["_is_str"] = d.Signal.eq("Strong Accumulation")
     d["_is_cont"] = (d["Buying_Status"].eq("Continuing")
                      if "Buying_Status" in d.columns
                      else pd.Series(False, index=d.index))
     d["_is_fresh"] = (d["Fresh"].isin(FRESH_SET)
                       if "Fresh" in d.columns
                       else pd.Series(False, index=d.index))
-
     agg = {
         "Stocks":       ("Symbol", "count"),
         "Accumulating": ("_is_acc", "sum"),
@@ -482,26 +471,183 @@ def sector_rotation(pool: pd.DataFrame) -> pd.DataFrame:
     for c in ["Ret_1W", "Ret_1M", "Ret_3M"]:
         if c in d.columns:
             agg[c] = (c, "median")
-
     g = d.groupby("Sector", dropna=False).agg(**agg).reset_index()
-
-    g["Acc_Pct"]   = (100 * g.Accumulating / g.Stocks.replace(0, np.nan)).round(0).fillna(0).astype(int)
-    g["Flow_1M"]   = g.Flow_1M.round(2)
+    g["Acc_Pct"] = (100 * g.Accumulating / g.Stocks.replace(0, np.nan)).round(0).fillna(0).astype(int)
+    g["Flow_1M"] = g.Flow_1M.round(2)
     g["Flow_Prev"] = g.Flow_Prev.round(2)
-    g["Flow_Chg"]  = (g.Flow_1M - g.Flow_Prev).round(2)
+    g["Flow_Chg"] = (g.Flow_1M - g.Flow_Prev).round(2)
 
     def _q(row):
         f, ch = row.Flow_1M, row.Flow_Chg
         if pd.isna(f) or pd.isna(ch): return "Lagging"
         if f >= 0 and ch >= 0: return "Leading"
-        if f <  0 and ch >= 0: return "Improving"
-        if f >= 0 and ch <  0: return "Weakening"
+        if f < 0 and ch >= 0: return "Improving"
+        if f >= 0 and ch < 0: return "Weakening"
         return "Lagging"
-
     g["Quadrant"] = g.apply(_q, axis=1)
-
     cols = ["Sector", "Quadrant", "Stocks", "Accumulating", "Strong", "Continuing", "Fresh",
             "Acc_Pct", "Flow_1M", "Flow_Prev", "Flow_Chg", "Deliv_Qty_X",
             "Ret_1W", "Ret_1M", "Ret_3M"]
     cols = [c for c in cols if c in g.columns]
     return g[cols].sort_values(["Flow_Chg", "Flow_1M"], ascending=False).reset_index(drop=True)
+
+
+# ============ RE-ENTRY TRACKER (SQLite) ============ #
+def _init_tracker_db():
+    try:
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS screener_log (
+                run_date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                signal TEXT,
+                score INTEGER,
+                price REAL,
+                entry REAL,
+                sl REAL,
+                t1 REAL, t2 REAL, t3 REAL,
+                sl_hit INTEGER DEFAULT 0,
+                PRIMARY KEY (run_date, symbol)
+            )
+        """)
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def update_sl_hits(hist):
+    """Mark SL hit for open entries by checking intraday lows after run_date."""
+    if hist is None or hist.empty:
+        return
+    try:
+        _init_tracker_db()
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        cur = con.execute("SELECT rowid, symbol, run_date, sl FROM screener_log WHERE sl_hit = 0")
+        rows = cur.fetchall()
+        if not rows:
+            con.close()
+            return
+        hist_clean = hist.copy()
+        hist_clean["Date"] = pd.to_datetime(hist_clean["Date"], errors="coerce")
+        to_mark = []
+        for rid, sym, rd, sl in rows:
+            if not sym or not sl or sl <= 0:
+                continue
+            try:
+                rd_dt = pd.to_datetime(rd)
+            except Exception:
+                continue
+            g = hist_clean[(hist_clean.Symbol == sym) & (hist_clean.Date > rd_dt)]
+            if g.empty:
+                continue
+            if float(g.LOW_PRICE.min()) <= float(sl):
+                to_mark.append((rid,))
+        if to_mark:
+            con.executemany("UPDATE screener_log SET sl_hit=1 WHERE rowid=?", to_mark)
+            con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def reentry_stats(scr, asof_date, window_days=120):
+    """Enrich screener with re-entry history from past logs."""
+    if scr is None or scr.empty:
+        return scr
+    try:
+        _init_tracker_db()
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        cur = con.execute("""
+            SELECT symbol,
+                   COUNT(*) AS appearances,
+                   MIN(run_date) AS first_seen,
+                   MAX(run_date) AS last_seen,
+                   MAX(sl_hit) AS sl_hit_ever
+            FROM screener_log
+            WHERE run_date >= date(?, ?)
+            GROUP BY symbol
+        """, (str(asof_date), f"-{window_days} days"))
+        rows = cur.fetchall()
+        con.close()
+        stats = pd.DataFrame(rows, columns=["Symbol","Past_Appearances","First_Seen","Last_Seen","SL_Hit_Ever"])
+    except Exception:
+        stats = pd.DataFrame()
+
+    if stats.empty:
+        scr["Reentry"] = "🆕 First time"
+        scr["Appearances_120D"] = 1
+        scr["Days_Since_First"] = 0
+        return scr
+
+    m = scr.merge(stats, on="Symbol", how="left")
+    m["Past_Appearances"] = m["Past_Appearances"].fillna(0).astype(int)
+    m["SL_Hit_Ever"] = m["SL_Hit_Ever"].fillna(0).astype(int)
+    m["Appearances_120D"] = m["Past_Appearances"] + 1
+
+    def _flag(r):
+        if r.Past_Appearances == 0:
+            return "🆕 First time"
+        if r.SL_Hit_Ever == 1:
+            return "🔁 SL hit earlier"
+        if r.Past_Appearances >= 3:
+            return "🔁 Repeat"
+        return "🔁 Second chance"
+
+    m["Reentry"] = m.apply(_flag, axis=1)
+    try:
+        asof_dt = pd.to_datetime(asof_date)
+        m["Days_Since_First"] = m["First_Seen"].apply(
+            lambda x: (asof_dt - pd.to_datetime(x)).days if pd.notna(x) else 0)
+    except Exception:
+        m["Days_Since_First"] = 0
+    m = m.drop(columns=["Past_Appearances","SL_Hit_Ever","First_Seen","Last_Seen"], errors="ignore")
+    return m
+
+
+def log_screener_run(scr, asof_date):
+    """Save today's picks into DB (idempotent per day)."""
+    if scr is None or scr.empty:
+        return
+    try:
+        _init_tracker_db()
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        rd = str(asof_date)
+        rows = []
+        for _, r in scr.iterrows():
+            rows.append((
+                rd, str(r.get("Symbol","")), str(r.get("Signal","")),
+                int(r.get("Score", 0) or 0),
+                float(r.get("Price", 0) or 0), float(r.get("Entry", 0) or 0),
+                float(r.get("SL", 0) or 0), float(r.get("T1", 0) or 0),
+                float(r.get("T2", 0) or 0), float(r.get("T3", 0) or 0),
+            ))
+        con.executemany("""
+            INSERT OR IGNORE INTO screener_log
+            (run_date, symbol, signal, score, price, entry, sl, t1, t2, t3, sl_hit)
+            VALUES (?,?,?,?,?,?,?,?,?,?,0)
+        """, rows)
+        con.execute("DELETE FROM screener_log WHERE run_date < date(?, '-180 days')", (rd,))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+
+def reentry_history(symbol, limit=20):
+    """Return past log entries for a symbol (newest first)."""
+    try:
+        _init_tracker_db()
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        cur = con.execute("""
+            SELECT run_date, signal, score, price, entry, sl, sl_hit
+            FROM screener_log
+            WHERE symbol = ?
+            ORDER BY run_date DESC
+            LIMIT ?
+        """, (str(symbol), int(limit)))
+        rows = cur.fetchall()
+        con.close()
+        return pd.DataFrame(rows, columns=["Date","Signal","Score","Price","Entry","SL","SL_Hit"])
+    except Exception:
+        return pd.DataFrame()
