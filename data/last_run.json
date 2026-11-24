@@ -1,16 +1,16 @@
 {
-  "asof": "2026-11-20",
-  "run_at_ist": "2026-11-21 02:56",
-  "stocks": 1249,
-  "accumulation": 453,
-  "fresh": 176,
-  "logged": 453,
+  "asof": "2026-11-23",
+  "run_at_ist": "2026-11-24 06:38",
+  "stocks": 1252,
+  "accumulation": 426,
+  "fresh": 178,
+  "logged": 426,
   "min_turnover_cr": 5.0,
   "info": {
     "days": 61,
     "errors": 0,
     "missing": 0,
-    "delivery_cov": 91.9,
+    "delivery_cov": 92.0,
     "dropped": 0
   },
   "deals_stale": false,
